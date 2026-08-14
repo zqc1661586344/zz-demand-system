@@ -1,0 +1,123 @@
+"""Document API routes — upload, list, delete, reprocess."""
+
+import os
+import uuid
+from pathlib import Path
+
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
+from sqlalchemy.orm import Session
+
+from app.config import settings
+from app.database import get_db
+from app.dependencies import get_current_user
+from app.models.user import User
+from app.schemas.document import DocumentResponse, DocumentUploadResponse, ReprocessResponse
+from app.services.document_service import (
+    create_document,
+    delete_document,
+    get_all_documents,
+    get_document_by_id,
+    update_document_status,
+)
+from app.rag.pipeline import process_document
+
+router = APIRouter(prefix="/api/documents", tags=["documents"])
+
+
+@router.post("/upload", response_model=DocumentUploadResponse, status_code=201)
+async def upload_document(
+    file: UploadFile = File(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # Validate file type
+    allowed_types = {
+        "application/pdf": ".pdf",
+        "text/plain": ".txt",
+        "text/markdown": ".md",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    }
+    mime_type = file.content_type or "application/octet-stream"
+    if mime_type not in allowed_types:
+        raise HTTPException(status_code=400, detail=f"Unsupported file type: {mime_type}")
+
+    # Save file to disk
+    os.makedirs(settings.upload_path, exist_ok=True)
+    ext = allowed_types.get(mime_type, ".bin")
+    stored_name = f"{uuid.uuid4().hex}{ext}"
+    file_path = settings.upload_path / stored_name
+
+    content = await file.read()
+    with open(file_path, "wb") as f:
+        f.write(content)
+
+    # Create DB record
+    doc = create_document(
+        db=db,
+        filename=stored_name,
+        original_filename=file.filename or stored_name,
+        file_size=len(content),
+        mime_type=mime_type,
+        uploaded_by=current_user.id,
+    )
+
+    # Trigger async processing pipeline
+    background_tasks.add_task(process_document, doc.id)
+
+    return DocumentUploadResponse(id=doc.id, filename=stored_name, status="pending")
+
+
+@router.get("", response_model=list[DocumentResponse])
+def list_documents(
+    skip: int = 0,
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    return get_all_documents(db, skip=skip, limit=limit)
+
+
+@router.get("/{doc_id}", response_model=DocumentResponse)
+def get_document(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    doc = get_document_by_id(db, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    return doc
+
+
+@router.delete("/{doc_id}")
+def delete_document_route(
+    doc_id: str,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    doc = get_document_by_id(db, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc.uploaded_by != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    if not delete_document(db, doc_id):
+        raise HTTPException(status_code=500, detail="Failed to delete document")
+    return {"message": "Document deleted successfully"}
+
+
+@router.post("/{doc_id}/reprocess", response_model=ReprocessResponse)
+def reprocess_document(
+    doc_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    doc = get_document_by_id(db, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc.uploaded_by != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    doc = update_document_status(db, doc_id, "pending", error_message=None)
+    background_tasks.add_task(process_document, doc_id)
+    return ReprocessResponse(id=doc_id, status="pending")
