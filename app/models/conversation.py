@@ -17,6 +17,7 @@ class Conversation(Base):
     created_by = Column(String(36), ForeignKey("users.id"), nullable=False)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
+    summary = Column(Text, nullable=True)  # Compressed summary for long-term memory
 
     # Relationships
     creator = relationship("User", back_populates="conversations")

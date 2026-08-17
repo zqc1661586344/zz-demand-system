@@ -66,3 +66,11 @@ def add_message(
     db.commit()
     db.refresh(msg)
     return msg
+
+
+def update_summary(db: Session, conversation_id: str, summary: str) -> None:
+    """Store or update the compressed summary on a conversation."""
+    conv = db.query(Conversation).filter(Conversation.id == conversation_id).first()
+    if conv:
+        conv.summary = summary
+        db.commit()

@@ -19,7 +19,8 @@ RAG_PROMPT = ChatPromptTemplate.from_messages([
         "Use the following context to answer the user's question. "
         "If you don't know the answer based on the context, say so clearly. "
         "Always cite the source document names in your answer.\n\n"
-        "Context:\n{context}",
+        "Context:\n{context}\n\n"
+        "Conversation history:\n{history}",
     ),
     ("human", "{question}"),
 ])
@@ -51,6 +52,22 @@ def format_context(docs: list) -> str:
     return "\n\n".join(context_parts)
 
 
+def format_history(messages: list[dict], summary: str | None = None) -> str:
+    """Format conversation history into a readable string, with optional summary prefix."""
+    parts = []
+    if summary:
+        parts.append(f"[Summary of earlier conversation]\n{summary}")
+    if messages:
+        lines = []
+        for m in messages:
+            role = "User" if m["role"] == "user" else "Assistant"
+            lines.append(f"{role}: {m['content']}")
+        if summary:
+            parts.append("[Recent messages]")
+        parts.append("\n".join(lines))
+    return "\n\n".join(parts) if parts else "(no prior conversation)"
+
+
 def build_rag_chain():
     """Build the full RAG chain (retrieve → prompt → LLM → output)."""
     llm = get_llm()
@@ -65,8 +82,11 @@ def build_rag_chain():
     return chain
 
 
-def query_rag(query: str, top_k: int = 5) -> dict:
+def query_rag(query: str, top_k: int = 5, history: list[dict] | None = None, summary: str | None = None) -> dict:
     """Run a full RAG query: retrieve contexts, generate answer, return sources."""
+    # Format history into prompt context
+    history_text = format_history(history, summary=summary)
+
     # Retrieve relevant documents
     docs = similarity_search(query, k=top_k)
 
@@ -83,10 +103,37 @@ def query_rag(query: str, top_k: int = 5) -> dict:
 
     # Build and invoke chain
     chain = build_rag_chain()
-    answer = chain.invoke({"context": context, "question": query})
+    answer = chain.invoke({"context": context, "question": query, "history": history_text})
 
     return {
         "answer": answer,
         "sources": sources,
         "chunks": [{"content": d.page_content, "metadata": d.metadata} for d in docs],
     }
+
+
+# ---------- Conversation summarization ----------
+
+SUMMARY_PROMPT = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        "You are an expert at conversation summarization. "
+        "Read the following conversation between a User and an Assistant, "
+        "and produce a concise summary that captures all key information: "
+        "facts the user has mentioned, questions asked, and answers given. "
+        "Keep the summary to 3-5 sentences.",
+    ),
+    ("human", "{conversation}"),
+])
+
+
+def _build_summary_chain():
+    llm = get_llm()
+    return SUMMARY_PROMPT | llm | StrOutputParser()
+
+
+def generate_summary(messages: list[dict]) -> str:
+    """Generate a concise summary from a list of {role, content} messages."""
+    text = format_history(messages, summary=None)
+    chain = _build_summary_chain()
+    return chain.invoke({"conversation": text})
