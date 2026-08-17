@@ -31,20 +31,32 @@ async def upload_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Validate file type
-    allowed_types = {
+    # Validate file type — check MIME type first, then fall back to extension
+    mime_type = file.content_type or ""
+    ext = ""
+    allowed_exts = {".pdf", ".txt", ".md", ".docx"}
+    mime_to_ext = {
         "application/pdf": ".pdf",
         "text/plain": ".txt",
         "text/markdown": ".md",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     }
-    mime_type = file.content_type or "application/octet-stream"
-    if mime_type not in allowed_types:
-        raise HTTPException(status_code=400, detail=f"Unsupported file type: {mime_type}")
+    if mime_type in mime_to_ext:
+        ext = mime_to_ext[mime_type]
+    else:
+        # Fall back to file extension
+        import mimetypes
+        guessed = mimetypes.guess_extension(file.filename or "") or ""
+        if guessed in allowed_exts:
+            ext = guessed
+            # Map extension back to a known MIME type
+            reverse_map = {v: k for k, v in mime_to_ext.items()}
+            mime_type = reverse_map.get(ext, mime_type)
+        else:
+            raise HTTPException(status_code=400, detail=f"Unsupported file type: {mime_type or file.filename}")
 
     # Save file to disk
     os.makedirs(settings.upload_path, exist_ok=True)
-    ext = allowed_types.get(mime_type, ".bin")
     stored_name = f"{uuid.uuid4().hex}{ext}"
     file_path = settings.upload_path / stored_name
 

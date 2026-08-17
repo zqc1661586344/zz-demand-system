@@ -79,7 +79,7 @@ class ApiClient:
     def delete(self, path: str, **kwargs) -> Any:
         return self.request("DELETE", path, **kwargs)
 
-    def upload(self, path: str, data: dict, files: dict) -> Any:
+    def upload(self, path: str, files: dict, data: dict | None = None) -> Any:
         """Upload a file via multipart POST."""
         headers = {}
         if self.access_token:

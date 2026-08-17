@@ -17,6 +17,11 @@ data/app.db
 .venv/
 venv/
 
+# Claude Code
+.claude/
+.agents/
+skills-lock.json
+
 # IDE
 .vscode/
 .idea/
