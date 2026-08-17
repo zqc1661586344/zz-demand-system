@@ -64,8 +64,8 @@ def get_embedding_model():
 
         return OpenAIEmbeddings(
             model=settings.embedding_model or "text-embedding-ada-002",
-            openai_api_key=settings.llm_api_key,
-            openai_api_base=settings.llm_api_base,
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_api_base,
         )
 
     elif provider == "ollama":
@@ -88,14 +88,15 @@ def get_llm():
     if provider == "local" or provider == "test":
         return _fake_llm_runnable
 
+    # TODO: 后续加上其他模型适配
     if provider == "openai":
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(
             model=settings.llm_model or "gpt-4o-mini",
             temperature=0.3,
-            openai_api_key=settings.llm_api_key,
-            openai_api_base=settings.llm_api_base,
+            api_key=settings.llm_api_key,
+            base_url=settings.llm_api_base,
         )
 
     elif provider == "ollama":

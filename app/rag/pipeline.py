@@ -19,18 +19,21 @@ def load_document(file_path: str, mime_type: str) -> list[Document]:
     """Load a document from disk and return LangChain Document objects."""
     path = Path(file_path)
 
+    # pdf文件
     if mime_type == "application/pdf":
         from langchain_community.document_loaders import PyPDFLoader
 
         loader = PyPDFLoader(str(path))
         return loader.load()
 
+    # markdown文件
     elif mime_type == "text/plain" or mime_type == "text/markdown":
         from langchain_community.document_loaders import TextLoader
 
         loader = TextLoader(str(path), encoding="utf-8")
         return loader.load()
 
+    # word文件
     elif mime_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
         from langchain_community.document_loaders import Docx2txtLoader
 
@@ -59,7 +62,7 @@ def process_document(doc_id: str) -> None:
         # Mark as processing
         update_document_status(db, doc_id, "processing")
 
-        # Load raw text
+        # 按文件类型加载文档
         raw_docs = load_document(doc.file_path, doc.mime_type)
 
         # Add metadata
@@ -67,19 +70,20 @@ def process_document(doc_id: str) -> None:
             d.metadata["document_id"] = doc.id
             d.metadata["filename"] = doc.original_filename
 
-        # Split into chunks
+        # 切分chunks
         splitter = get_default_splitter()
         chunks = splitter.split_documents(raw_docs)
 
         if not chunks:
+            # 如果没有切分出任何chunk，则标记为indexed
             update_document_status(db, doc_id, "indexed", chunk_count=0)
             logger.info(f"Document {doc_id}: empty after splitting, marked indexed")
             return
 
-        # Index into Chroma
+        # 存入向量数据库
         add_documents_to_store(chunks)
 
-        # Update status
+        # 更新数据库状态为indexed
         update_document_status(db, doc_id, "indexed", chunk_count=len(chunks))
         logger.info(f"Document {doc_id}: indexed {len(chunks)} chunks")
 
