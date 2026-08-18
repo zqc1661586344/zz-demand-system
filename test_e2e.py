@@ -11,7 +11,8 @@ import time
 import urllib.request
 import urllib.error
 
-BASE = "http://localhost:8000/api"
+BASE = "http://localhost:8001/api"
+
 
 def req(method, path, data=None, token=None):
     url = f"{BASE}{path}"
@@ -32,6 +33,7 @@ def req(method, path, data=None, token=None):
         print(f"  ERROR {e.code} {method} {path}: {detail}")
         return e.code, detail
 
+
 def main():
     username = f"testuser_{int(time.time())}"
     password = "Test@1234"
@@ -39,10 +41,11 @@ def main():
 
     # 1. Register
     print(f"=== 1. Register user: {username} ===")
-    status, data = req("POST", "/auth/register", {
-        "username": username, "password": password,
-        "email": email, "full_name": "Test User"
-    })
+    status, data = req(
+        "POST",
+        "/auth/register",
+        {"username": username, "password": password, "email": email, "full_name": "Test User"},
+    )
     assert status == 201, f"Register failed: {data}"
     access_token = data["access_token"]
     refresh_token = data["refresh_token"]
@@ -121,7 +124,7 @@ def main():
         status, data = req("GET", f"/documents/{doc_id}", token=access_token)
         if status == 200:
             doc_status = data["status"]
-            print(f"  Poll {i+1}: status={doc_status}, chunk_count={data.get('chunk_count', 0)}")
+            print(f"  Poll {i + 1}: status={doc_status}, chunk_count={data.get('chunk_count', 0)}")
             if doc_status == "indexed":
                 print(f"  ✓ Document indexed with {data['chunk_count']} chunks!")
                 break
@@ -129,25 +132,28 @@ def main():
                 print(f"  ✗ Document processing failed: {data.get('error_message', 'unknown')}")
                 sys.exit(1)
         else:
-            print(f"  Poll {i+1}: HTTP {status}")
+            print(f"  Poll {i + 1}: HTTP {status}")
     else:
         print("  ✗ Timeout waiting for indexing")
         sys.exit(1)
 
     # 6. Create conversation
     print("\n=== 6. Create conversation ===")
-    status, data = req("POST", "/conversations", {
-        "title": "E2E Test Conversation"
-    }, token=access_token)
+    status, data = req(
+        "POST", "/conversations", {"title": "E2E Test Conversation"}, token=access_token
+    )
     assert status == 201, f"Create conversation failed: {data}"
     conv_id = data["id"]
     print(f"  ✓ Conversation created: id={conv_id}")
 
     # 7. RAG Query
     print("\n=== 7. RAG Query ===")
-    status, data = req("POST", f"/conversations/{conv_id}/query", {
-        "query": "What are the key features of the Enterprise RAG System?"
-    }, token=access_token)
+    status, data = req(
+        "POST",
+        f"/conversations/{conv_id}/query",
+        {"query": "What are the key features of the Enterprise RAG System?"},
+        token=access_token,
+    )
     assert status == 200, f"Query failed: {data}"
     print(f"  Answer: {data['answer'][:200]}...")
     if data["sources"]:
@@ -173,6 +179,7 @@ def main():
     print("\n" + "=" * 50)
     print("ALL E2E TESTS PASSED! 🎉")
     print("=" * 50)
+
 
 if __name__ == "__main__":
     main()

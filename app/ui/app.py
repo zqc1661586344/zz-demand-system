@@ -3,6 +3,7 @@
 import gradio as gr
 import httpx
 
+from app.ui.api_client import BASE_URL
 from app.ui.auth_helpers import AuthState
 from app.ui.pages.chat import render as render_chat
 from app.ui.pages.documents import render as render_documents
@@ -51,6 +52,17 @@ footer, .footer, .gr-footer { display:none !important; }
 .input-area .gr-text-input { border-radius:8px !important; border:1px solid #dee2e6 !important; font-size:14px !important; }
 .input-area button { border-radius:8px !important; font-weight:600 !important; }
 
+/* error message bubble — red-tinted blockquote inside the chat area */
+.chat-area .gr-chatbot blockquote {
+    background:#fde8e8 !important;
+    border-left:4px solid #e53e3e !important;
+    color:#9b2c2c !important;
+    border-radius:6px !important;
+    padding:8px 12px !important;
+    margin:4px 0 !important;
+    font-size:14px !important;
+}
+
 /* ===== History ===== */
 .history-content { padding:0 24px !important; }
 .history-table { border:1px solid #e9ecef !important; border-radius:12px !important; box-shadow:0 1px 4px rgba(0,0,0,0.05) !important; overflow:hidden !important; }
@@ -76,14 +88,14 @@ footer, .footer, .gr-footer { display:none !important; }
 def _auto_login() -> str:
     try:
         resp = httpx.post(
-            "http://localhost:8001/api/auth/login",
+            f"{BASE_URL}/api/auth/login",
             json={"username": "admin", "password": "admin123"},
             timeout=10,
         )
         if resp.status_code == 200:
             data = resp.json()
             me = httpx.get(
-                "http://localhost:8001/api/auth/me",
+                f"{BASE_URL}/api/auth/me",
                 headers={"Authorization": f"Bearer {data['access_token']}"},
                 timeout=10,
             )
