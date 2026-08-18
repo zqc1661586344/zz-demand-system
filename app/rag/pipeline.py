@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_document(file_path: str, mime_type: str) -> list[Document]:
-    """Load a document from disk and return LangChain Document objects."""
+    """从磁盘加载文件并返回LangChain的Document对象列表。"""
     path = Path(file_path)
 
     # pdf文件
@@ -45,12 +45,12 @@ def load_document(file_path: str, mime_type: str) -> list[Document]:
 
 
 def process_document(doc_id: str) -> None:
-    """Full processing pipeline for a single document.
+    """单个文档完整处理流程：
 
-    1. Load from disk
-    2. Split into chunks
-    3. Embed and index into Chroma
-    4. Update DB status
+    1. 从磁盘加载
+    2. 分成若干块
+    3. 嵌入并索引到Chroma中
+    4. 更新数据库状态
     """
     db: Session = SessionLocal()
     try:

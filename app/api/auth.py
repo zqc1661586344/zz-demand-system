@@ -36,7 +36,9 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
     if db.query(User).filter(User.email == req.email).first():
         raise HTTPException(status_code=400, detail="Email already exists")
 
-    user = register_user(db, username=req.username, password=req.password, email=req.email, full_name=req.full_name)
+    user = register_user(
+        db, username=req.username, password=req.password, email=req.email, full_name=req.full_name
+    )
     return TokenResponse(
         access_token=create_access_token(user.id),
         refresh_token=create_refresh_token(user.id),

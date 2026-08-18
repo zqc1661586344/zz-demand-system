@@ -2,7 +2,6 @@
 
 import os
 import uuid
-from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
@@ -54,7 +53,13 @@ def delete_document(db: Session, doc_id: str) -> bool:
     return True
 
 
-def update_document_status(db: Session, doc_id: str, status: str, chunk_count: int | None = None, error_message: str | None = None) -> Document | None:
+def update_document_status(
+    db: Session,
+    doc_id: str,
+    status: str,
+    chunk_count: int | None = None,
+    error_message: str | None = None,
+) -> Document | None:
     doc = get_document_by_id(db, doc_id)
     if doc is None:
         return None
@@ -63,7 +68,6 @@ def update_document_status(db: Session, doc_id: str, status: str, chunk_count: i
         doc.chunk_count = chunk_count
     if error_message is not None:
         doc.error_message = error_message
-    doc.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(doc)
     return doc

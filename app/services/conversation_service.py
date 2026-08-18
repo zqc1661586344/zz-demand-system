@@ -21,8 +21,17 @@ def create_conversation(db: Session, created_by: str, title: str | None = None) 
     return conv
 
 
-def get_conversations_for_user(db: Session, user_id: str, skip: int = 0, limit: int = 100) -> list[Conversation]:
-    return db.query(Conversation).filter(Conversation.created_by == user_id).order_by(Conversation.updated_at.desc()).offset(skip).limit(limit).all()
+def get_conversations_for_user(
+    db: Session, user_id: str, skip: int = 0, limit: int = 100
+) -> list[Conversation]:
+    return (
+        db.query(Conversation)
+        .filter(Conversation.created_by == user_id)
+        .order_by(Conversation.updated_at.desc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 
 def get_conversation_by_id(db: Session, conv_id: str) -> Conversation | None:
@@ -38,8 +47,17 @@ def delete_conversation(db: Session, conv_id: str) -> bool:
     return True
 
 
-def get_messages(db: Session, conversation_id: str, skip: int = 0, limit: int = 200) -> list[Message]:
-    return db.query(Message).filter(Message.conversation_id == conversation_id).order_by(Message.created_at.asc()).offset(skip).limit(limit).all()
+def get_messages(
+    db: Session, conversation_id: str, skip: int = 0, limit: int = 200
+) -> list[Message]:
+    return (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .order_by(Message.created_at.asc())
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 
 def add_message(

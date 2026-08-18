@@ -14,16 +14,22 @@ def get_user_by_id(db: Session, user_id: str) -> User | None:
     return db.query(User).filter(User.id == user_id).first()
 
 
-def update_user(db: Session, user_id: str, full_name: str | None = None, email: str | None = None, is_active: bool | None = None) -> User | None:
+def update_user(
+    db: Session,
+    user_id: str,
+    full_name: str | None = None,
+    email: str | None = None,
+    is_active: bool | None = None,
+) -> User | None:
     user = get_user_by_id(db, user_id)
     if user is None:
         return None
     if full_name is not None:
-        user.full_name = full_name
+        user.full_name = full_name  # type: ignore[assignment]
     if email is not None:
-        user.email = email
+        user.email = email  # type: ignore[assignment]
     if is_active is not None:
-        user.is_active = is_active
+        user.is_active = is_active  # type: ignore[assignment]
     db.commit()
     db.refresh(user)
     return user

@@ -41,7 +41,7 @@ def _build_history(conv, db, conv_id):
     total = len(prior_msgs)
 
     if total > RECENT_ROUNDS * 2:
-        recent_raw = prior_msgs[-(RECENT_ROUNDS * 2):]
+        recent_raw = prior_msgs[-(RECENT_ROUNDS * 2) :]
         history = [{"role": m.role, "content": m.content} for m in recent_raw]
         summary = conv.summary
     else:
@@ -70,7 +70,7 @@ def new_conversation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    conv = create_conversation(db, title=req.title, created_by=current_user.id)
+    conv = create_conversation(db, title=req.title, created_by=current_user.id)  # type: ignore[assignment]
     return conv
 
 
@@ -81,17 +81,19 @@ def list_conversations(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    convs = get_conversations_for_user(db, current_user.id, skip=skip, limit=limit)
+    convs = get_conversations_for_user(db, current_user.id, skip=skip, limit=limit)  # type: ignore[assignment]
     result = []
     for conv in convs:
-        result.append(ConversationResponse(
-            id=conv.id,
-            title=conv.title,
-            created_by=conv.created_by,
-            created_at=conv.created_at,
-            updated_at=conv.updated_at,
-            message_count=len(conv.messages) if hasattr(conv, "messages") else 0,
-        ))
+        result.append(
+            ConversationResponse(
+                id=conv.id,  # type: ignore[assignment]
+                title=conv.title,  # type: ignore[assignment]
+                created_by=conv.created_by,  # type: ignore[assignment]
+                created_at=conv.created_at,  # type: ignore[assignment]
+                updated_at=conv.updated_at,  # type: ignore[assignment]
+                message_count=len(conv.messages) if hasattr(conv, "messages") else 0,
+            )
+        )
     return result
 
 
@@ -104,7 +106,7 @@ def get_conversation(
     conv = get_conversation_by_id(db, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    if conv.created_by != current_user.id and not current_user.is_superuser:
+    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
         raise HTTPException(status_code=403, detail="Access denied")
     return ConversationResponse(
         id=conv.id,
@@ -125,7 +127,7 @@ def remove_conversation(
     conv = get_conversation_by_id(db, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    if conv.created_by != current_user.id and not current_user.is_superuser:
+    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
         raise HTTPException(status_code=403, detail="Access denied")
     if not delete_conversation(db, conv_id):
         raise HTTPException(status_code=500, detail="Failed to delete conversation")
@@ -143,22 +145,25 @@ def list_messages(
     conv = get_conversation_by_id(db, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    if conv.created_by != current_user.id and not current_user.is_superuser:
+    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
         raise HTTPException(status_code=403, detail="Access denied")
     return get_messages(db, conv_id, skip=skip, limit=limit)
 
 
 @router.post("/{conv_id}/query", response_model=QueryResponse)
 def query_conversation(
-    conv_id: str,
-    req: QueryRequest,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    conv_id: str,  # 对话ID，字符串类型
+    req: QueryRequest,  # 查询请求对象，包含查询内容和相关参数
+    db: Session = Depends(get_db),  # 数据库会话，依赖注入获取
+    current_user: User = Depends(get_current_user),  # 当前用户，依赖注入获取
 ):
+    # 根据ID获取对话
     conv = get_conversation_by_id(db, conv_id)
+    # 如果对话不存在，抛出404异常
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    if conv.created_by != current_user.id and not current_user.is_superuser:
+    # 检查用户权限：只有创建者或超级用户可以访问
+    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
         raise HTTPException(status_code=403, detail="Access denied")
 
     # Build history: summary for old rounds + recent messages
@@ -207,41 +212,49 @@ def query_conversation_stream(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    """Streaming RAG query — SSE stream of tokens, then sources + DB save."""
+    """流式RAG查询 — SSE标记流，然后是源数据+数据库保存。"""
+
     conv = get_conversation_by_id(db, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
-    if conv.created_by != current_user.id and not current_user.is_superuser:
+
+    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
         raise HTTPException(status_code=403, detail="Access denied")
 
     history, summary, total = _build_history(conv, db, conv_id)
 
     def event_stream():
-        full_answer = ""
-        for event in query_rag_stream(query=req.query, top_k=req.top_k, history=history, summary=summary):
-            if event["type"] == "token":
-                full_answer += event["data"]
-                yield f"data: {json.dumps({'token': event['data']})}\n\n"
-            elif event["type"] == "sources":
-                sources = event["data"]
-                # Schedule background DB write
-                background_tasks.add_task(
-                    _save_messages_background,
-                    conv_id,
-                    req.query,
-                    event["full_answer"],
-                    sources,
-                )
-                # Also trigger summary regeneration in background
-                background_tasks.add_task(_maybe_summarize_background, conv_id, total)
-                yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
-                yield "data: [DONE]\n\n"
+        try:
+            for event in query_rag_stream(
+                query=req.query, top_k=req.top_k, history=history, summary=summary
+            ):
+                if event["type"] == "token":
+                    yield f"data: {json.dumps({'token': event['data']})}\n\n"
+                elif event["type"] == "sources":
+                    sources = event["data"]
+                    # Schedule background DB write
+                    background_tasks.add_task(
+                        _save_messages_background,
+                        conv_id,
+                        req.query,
+                        event["full_answer"],
+                        sources,
+                    )
+                    # Also trigger summary regeneration in background
+                    background_tasks.add_task(_maybe_summarize_background, conv_id, total)
+                    yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
+                    yield "data: [DONE]\n\n"
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning("Streaming RAG query failed: %s", e)
+            yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
+            yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 def _maybe_summarize_background(conv_id: str, total: int):
-    """Background task: trigger summary regeneration with its own DB session."""
+    """后台任务：使用自己的数据库会话触发摘要重新生成。"""
     db = SessionLocal()
     try:
         _maybe_summarize(db, conv_id, total)

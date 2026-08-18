@@ -6,7 +6,7 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
-from app.rag.embeddings import get_llm
+from app.rag.llms import get_llm
 from app.rag.vector_store import similarity_search
 
 logger = logging.getLogger(__name__)
