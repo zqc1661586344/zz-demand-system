@@ -11,19 +11,21 @@ from app.rag.vector_store import similarity_search
 
 logger = logging.getLogger(__name__)
 
-# Default RAG prompt template
-RAG_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "You are a helpful assistant for internal knowledge base queries. "
-        "Use the following context to answer the user's question. "
-        "If you don't know the answer based on the context, say so clearly. "
-        "Always cite the source document names in your answer.\n\n"
-        "Context:\n{context}\n\n"
-        "Conversation history:\n{history}",
-    ),
-    ("human", "{question}"),
-])
+# RAG提示词模板
+RAG_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a helpful assistant for internal knowledge base queries. "
+            "Use the following context to answer the user's question. "
+            "If you don't know the answer based on the context, say so clearly. "
+            "Always cite the source document names in your answer.\n\n"
+            "Context:\n{context}\n\n"
+            "Conversation history:\n{history}",
+        ),
+        ("human", "{question}"),
+    ]
+)
 
 
 def format_sources(docs: list) -> list[dict]:
@@ -72,22 +74,20 @@ def build_rag_chain():
     """Build the full RAG chain (retrieve → prompt → LLM → output)."""
     llm = get_llm()
 
-    chain = (
-        RunnablePassthrough()
-        | RAG_PROMPT
-        | llm
-        | StrOutputParser()
-    )
+    # 非标准的LCEL写法，没有包含检索内容，直接将检索结果作为输入，完成了 "prompt → LLM → output"这半段，不是完整的 RAG chain。真正的 RAG chain 在 LangChain 的 LCEL 写法应该是把检索也链进去
+    chain = RunnablePassthrough() | RAG_PROMPT | llm | StrOutputParser()
 
     return chain
 
 
-def query_rag(query: str, top_k: int = 5, history: list[dict] | None = None, summary: str | None = None) -> dict:
+def query_rag(
+    query: str, top_k: int = 5, history: list[dict] | None = None, summary: str | None = None
+) -> dict:
     """Run a full RAG query: retrieve contexts, generate answer, return sources."""
     # Format history into prompt context
     history_text = format_history(history, summary=summary)
 
-    # Retrieve relevant documents
+    # 检索相关文档
     docs = similarity_search(query, k=top_k)
 
     if not docs:
@@ -113,18 +113,20 @@ def query_rag(query: str, top_k: int = 5, history: list[dict] | None = None, sum
 
 
 # ---------- Conversation summarization ----------
-
-SUMMARY_PROMPT = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        "You are an expert at conversation summarization. "
-        "Read the following conversation between a User and an Assistant, "
-        "and produce a concise summary that captures all key information: "
-        "facts the user has mentioned, questions asked, and answers given. "
-        "Keep the summary to 3-5 sentences.",
-    ),
-    ("human", "{conversation}"),
-])
+# 总结摘要提示词
+SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are an expert at conversation summarization. "
+            "Read the following conversation between a User and an Assistant, "
+            "and produce a concise summary that captures all key information: "
+            "facts the user has mentioned, questions asked, and answers given. "
+            "Keep the summary to 3-5 sentences.",
+        ),
+        ("human", "{conversation}"),
+    ]
+)
 
 
 def _build_summary_chain():
