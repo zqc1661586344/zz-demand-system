@@ -70,26 +70,26 @@ OLLAMA_EMBEDDING_MODEL=nomic-embed-text
 **使用测试模式（无需外部 API）**：
 ```bash
 # 通过环境变量启动
-LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8000
+LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8001
 ```
 
 ### 3. 启动服务
 
 ```bash
 # 开发模式
-uvicorn app.main:app --reload --port 8000
+uvicorn app.main:app --reload --port 8001
 
 # 生产模式
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uvicorn app.main:app --host 0.0.0.0 --port 8001
 ```
 
 ### 4. 访问应用
 
 | 地址 | 用途 |
 |------|------|
-| http://localhost:8000/ui | **Gradio Web 界面**（主入口） |
-| http://localhost:8000/docs | **API 文档**（Swagger UI） |
-| http://localhost:8000/redoc | API 文档（ReDoc） |
+| http://localhost:8001/ui | **Gradio Web 界面**（主入口） |
+| http://localhost:8001/docs | **API 文档**（Swagger UI） |
+| http://localhost:8001/redoc | API 文档（ReDoc） |
 
 ---
 
@@ -130,10 +130,13 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ### 工作流程
 
-```
-1. 注册/登录 → 2. 上传文档 → 3. 等待索引完成
-                                           ↓
-                                4. 新建对话 → 5. 提问 → 6. 查看回答与来源
+```mermaid
+flowchart LR
+    A[注册 / 登录] --> B[上传文档]
+    B --> C[等待索引完成]
+    C --> D[新建对话]
+    D --> E[提问]
+    E --> F[查看回答与来源]
 ```
 
 ### 支持的文件格式
@@ -153,12 +156,12 @@ uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 ```bash
 # 注册
-curl -X POST http://localhost:8000/api/auth/register \
+curl -X POST http://localhost:8001/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"username":"alice","password":"Secure@123","email":"alice@example.com","full_name":"Alice"}'
 
 # 登录
-curl -X POST http://localhost:8000/api/auth/login \
+curl -X POST http://localhost:8001/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"username":"alice","password":"Secure@123"}'
 # → 返回 {access_token, refresh_token}
@@ -168,18 +171,18 @@ curl -X POST http://localhost:8000/api/auth/login \
 
 ```bash
 # 上传文档（multipart）
-curl -X POST http://localhost:8000/api/documents/upload \
+curl -X POST http://localhost:8001/api/documents/upload \
   -H "Authorization: Bearer <token>" \
   -F "file=@report.pdf"
 # → 返回 {id, filename, status: "pending"}
 
 # 查看文档状态
-curl http://localhost:8000/api/documents/<doc-id> \
+curl http://localhost:8001/api/documents/<doc-id> \
   -H "Authorization: Bearer <token>"
 # → status: "indexed" 时表示处理完成
 
 # 列出所有文档
-curl http://localhost:8000/api/documents \
+curl http://localhost:8001/api/documents \
   -H "Authorization: Bearer <token>"
 ```
 
@@ -187,13 +190,13 @@ curl http://localhost:8000/api/documents \
 
 ```bash
 # 创建对话
-curl -X POST http://localhost:8000/api/conversations \
+curl -X POST http://localhost:8001/api/conversations \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{"title":"产品咨询"}'
 
 # 提问（RAG 查询）
-curl -X POST http://localhost:8000/api/conversations/<conv-id>/query \
+curl -X POST http://localhost:8001/api/conversations/<conv-id>/query \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer <token>" \
   -d '{"query":"产品的核心功能有哪些？"}'
@@ -235,7 +238,7 @@ server {
     server_name rag.example.com;
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:8001;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -256,7 +259,7 @@ After=network.target
 Type=simple
 User=www-data
 WorkingDirectory=/opt/zz-demand-system
-ExecStart=/opt/zz-demand-system/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+ExecStart=/opt/zz-demand-system/.venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8001
 Restart=always
 RestartSec=5
 Environment=APP_DEBUG=false
@@ -273,7 +276,7 @@ WantedBy=multi-user.target
 
 ```bash
 # 1. 启动服务（测试模式）
-LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8000 &
+LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8001 &
 
 # 2. 运行测试
 python test_e2e.py

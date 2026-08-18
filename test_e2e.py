@@ -171,7 +171,7 @@ def main():
 
     # 9. Health check
     print("\n=== 9. Health check ===")
-    with urllib.request.urlopen("http://localhost:8000/api/health") as resp:
+    with urllib.request.urlopen("http://localhost:8001/api/health") as resp:
         data = json.loads(resp.read().decode())
         assert data["status"] == "ok", f"Health check failed: {data}"
         print(f"  ✓ Health OK: {data}")
