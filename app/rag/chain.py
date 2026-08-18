@@ -29,7 +29,7 @@ RAG_PROMPT = ChatPromptTemplate.from_messages(
 
 
 def format_sources(docs: list) -> list[dict]:
-    """Extract source metadata from retrieved documents."""
+    """从检索到的文档中提取源元数据。"""
     seen = set()
     sources = []
     for doc in docs:
@@ -46,7 +46,7 @@ def format_sources(docs: list) -> list[dict]:
 
 
 def format_context(docs: list) -> str:
-    """Format retrieved documents into a context string."""
+    """将检索到的文档格式化为上下文字符串。"""
     context_parts = []
     for i, doc in enumerate(docs, 1):
         source = doc.metadata.get("filename", "Unknown")
@@ -54,8 +54,8 @@ def format_context(docs: list) -> str:
     return "\n\n".join(context_parts)
 
 
-def format_history(messages: list[dict], summary: str | None = None) -> str:
-    """Format conversation history into a readable string, with optional summary prefix."""
+def format_history(messages: list[dict] | None = None, summary: str | None = None) -> str:
+    """将对话历史格式化为可读的字符串，并可选择添加摘要前缀。"""
     parts = []
     if summary:
         parts.append(f"[Summary of earlier conversation]\n{summary}")
@@ -70,20 +70,25 @@ def format_history(messages: list[dict], summary: str | None = None) -> str:
     return "\n\n".join(parts) if parts else "(no prior conversation)"
 
 
+# RAG链的模块级缓存——一次构建，跨查询复用
+_rag_chain = None
+
+
 def build_rag_chain():
-    """Build the full RAG chain (retrieve → prompt → LLM → output)."""
-    llm = get_llm()
+    """构建或返回RAG链缓存: prompt → LLM → output parser."""
+    global _rag_chain
 
-    # 非标准的LCEL写法，没有包含检索内容，直接将检索结果作为输入，完成了 "prompt → LLM → output"这半段，不是完整的 RAG chain。真正的 RAG chain 在 LangChain 的 LCEL 写法应该是把检索也链进去
-    chain = RunnablePassthrough() | RAG_PROMPT | llm | StrOutputParser()
+    if _rag_chain is None:
+        llm = get_llm()
+        _rag_chain = RunnablePassthrough() | RAG_PROMPT | llm | StrOutputParser()
 
-    return chain
+    return _rag_chain
 
 
 def query_rag(
     query: str, top_k: int = 5, history: list[dict] | None = None, summary: str | None = None
 ) -> dict:
-    """Run a full RAG query: retrieve contexts, generate answer, return sources."""
+    """运行完整的RAG查询: retrieve contexts, generate answer, return sources."""
     # Format history into prompt context
     history_text = format_history(history, summary=summary)
 
@@ -112,7 +117,33 @@ def query_rag(
     }
 
 
+def query_rag_stream(
+    query: str, top_k: int = 5, history: list[dict] | None = None, summary: str | None = None
+):
+    """流式RAG查询，逐个token产出，最后一个event包含sources和完整answer。"""
+    history_text = format_history(history, summary=summary)
+
+    docs = similarity_search(query, k=top_k)
+
+    if not docs:
+        yield {"type": "token", "data": "No relevant documents found."}
+        yield {"type": "sources", "data": [], "full_answer": "No relevant documents found."}
+        return
+
+    context = format_context(docs)
+    sources = format_sources(docs)
+    chain = build_rag_chain()
+
+    full_answer = ""
+    for chunk in chain.stream({"context": context, "question": query, "history": history_text}):
+        full_answer += chunk
+        yield {"type": "token", "data": chunk}
+
+    yield {"type": "sources", "data": sources, "full_answer": full_answer}
+
+
 # ---------- Conversation summarization ----------
+
 # 总结摘要提示词
 SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
     [
@@ -129,13 +160,22 @@ SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
 )
 
 
+_summary_chain = None
+
+
 def _build_summary_chain():
-    llm = get_llm()
-    return SUMMARY_PROMPT | llm | StrOutputParser()
+    """构建或返回summary链: prompt → LLM → output parser。多轮对话时用于生成摘要。"""
+    global _summary_chain
+
+    if _summary_chain is None:
+        llm = get_llm()
+        _summary_chain = SUMMARY_PROMPT | llm | StrOutputParser()
+
+    return _summary_chain
 
 
 def generate_summary(messages: list[dict]) -> str:
-    """Generate a concise summary from a list of {role, content} messages."""
+    """根据一系列{角色, 内容}的消息，生成一个简洁的摘要。"""
     text = format_history(messages, summary=None)
     chain = _build_summary_chain()
     return chain.invoke({"conversation": text})

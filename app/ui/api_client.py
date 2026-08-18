@@ -7,7 +7,7 @@ import httpx
 
 logger = logging.getLogger(__name__)
 
-BASE_URL = "http://localhost:8000"
+BASE_URL = "http://localhost:8001"
 
 
 class ApiClient:

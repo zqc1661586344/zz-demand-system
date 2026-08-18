@@ -76,14 +76,14 @@ footer, .footer, .gr-footer { display:none !important; }
 def _auto_login() -> str:
     try:
         resp = httpx.post(
-            "http://localhost:8000/api/auth/login",
+            "http://localhost:8001/api/auth/login",
             json={"username": "admin", "password": "admin123"},
             timeout=10,
         )
         if resp.status_code == 200:
             data = resp.json()
             me = httpx.get(
-                "http://localhost:8000/api/auth/me",
+                "http://localhost:8001/api/auth/me",
                 headers={"Authorization": f"Bearer {data['access_token']}"},
                 timeout=10,
             )

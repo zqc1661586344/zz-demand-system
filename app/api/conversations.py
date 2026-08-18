@@ -1,14 +1,16 @@
 """Conversation API routes — CRUD and RAG query."""
 
+import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.database import get_db
+from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user
 from app.models.user import User
-from app.rag.chain import generate_summary, query_rag
+from app.rag.chain import generate_summary, query_rag, query_rag_stream
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationResponse,
@@ -31,6 +33,35 @@ RECENT_ROUNDS = 5
 SUMMARY_INTERVAL = RECENT_ROUNDS * 2  # 10 messages = every 5 rounds
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+
+
+def _build_history(conv, db, conv_id):
+    """Build history + summary from prior messages. Returns (history, summary, total)."""
+    prior_msgs = get_messages(db, conv_id, limit=100)
+    total = len(prior_msgs)
+
+    if total > RECENT_ROUNDS * 2:
+        recent_raw = prior_msgs[-(RECENT_ROUNDS * 2):]
+        history = [{"role": m.role, "content": m.content} for m in recent_raw]
+        summary = conv.summary
+    else:
+        history = [{"role": m.role, "content": m.content} for m in prior_msgs]
+        summary = None
+
+    return history, summary, total
+
+
+def _maybe_summarize(db, conv_id, total):
+    """Trigger summary regeneration every SUMMARY_INTERVAL messages."""
+    if (total + 2) >= SUMMARY_INTERVAL and (total + 2) % SUMMARY_INTERVAL == 0:
+        try:
+            all_msgs = get_messages(db, conv_id, limit=100)
+            history_all = [{"role": m.role, "content": m.content} for m in all_msgs]
+            new_summary = generate_summary(history_all)
+            update_summary(db, conv_id, new_summary)
+        except Exception as e:
+            logger = logging.getLogger(__name__)
+            logger.warning("Failed to generate conversation summary: %s", e)
 
 
 @router.post("", response_model=ConversationResponse, status_code=201)
@@ -131,25 +162,7 @@ def query_conversation(
         raise HTTPException(status_code=403, detail="Access denied")
 
     # Build history: summary for old rounds + recent messages
-    prior_msgs = get_messages(db, conv_id, limit=100)
-    total = len(prior_msgs)
-
-    if total > RECENT_ROUNDS * 2:
-        # We have a summary — only keep the last RECENT_ROUNDS rounds
-        recent_raw = prior_msgs[-(RECENT_ROUNDS * 2):]
-        recent_history = [
-            {"role": m.role, "content": m.content}
-            for m in recent_raw
-        ]
-        history = recent_history
-        summary = conv.summary
-    else:
-        # Not enough messages to need summarization — use all
-        history = [
-            {"role": m.role, "content": m.content}
-            for m in prior_msgs
-        ]
-        summary = None
+    history, summary, total = _build_history(conv, db, conv_id)
 
     # Always run RAG against the single document collection
     try:
@@ -166,18 +179,74 @@ def query_conversation(
     add_message(db, conv_id, role="assistant", content=answer, sources=sources)
 
     # Trigger summary regeneration every SUMMARY_INTERVAL messages
-    # (total+2 because we just added 2 messages: user + assistant)
-    if (total + 2) >= SUMMARY_INTERVAL and (total + 2) % SUMMARY_INTERVAL == 0:
-        try:
-            all_msgs = get_messages(db, conv_id, limit=100)
-            history_all = [
-                {"role": m.role, "content": m.content}
-                for m in all_msgs
-            ]
-            new_summary = generate_summary(history_all)
-            update_summary(db, conv_id, new_summary)
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.warning("Failed to generate conversation summary: %s", e)
+    _maybe_summarize(db, conv_id, total)
 
     return QueryResponse(answer=answer, sources=sources)
+
+
+def _save_messages_background(conv_id: str, query: str, answer: str, sources: list):
+    """Background task: save messages with its own DB session after stream completes."""
+    db = SessionLocal()
+    try:
+        add_message(db, conv_id, role="user", content=query)
+        add_message(db, conv_id, role="assistant", content=answer, sources=sources)
+        db.commit()
+    except Exception as e:
+        logger = logging.getLogger(__name__)
+        logger.warning("Failed to save streamed messages: %s", e)
+        db.rollback()
+    finally:
+        db.close()
+
+
+@router.post("/{conv_id}/query/stream")
+def query_conversation_stream(
+    conv_id: str,
+    req: QueryRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """Streaming RAG query — SSE stream of tokens, then sources + DB save."""
+    conv = get_conversation_by_id(db, conv_id)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv.created_by != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    history, summary, total = _build_history(conv, db, conv_id)
+
+    def event_stream():
+        full_answer = ""
+        for event in query_rag_stream(query=req.query, top_k=req.top_k, history=history, summary=summary):
+            if event["type"] == "token":
+                full_answer += event["data"]
+                yield f"data: {json.dumps({'token': event['data']})}\n\n"
+            elif event["type"] == "sources":
+                sources = event["data"]
+                # Schedule background DB write
+                background_tasks.add_task(
+                    _save_messages_background,
+                    conv_id,
+                    req.query,
+                    event["full_answer"],
+                    sources,
+                )
+                # Also trigger summary regeneration in background
+                background_tasks.add_task(_maybe_summarize_background, conv_id, total)
+                yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
+                yield "data: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+def _maybe_summarize_background(conv_id: str, total: int):
+    """Background task: trigger summary regeneration with its own DB session."""
+    db = SessionLocal()
+    try:
+        _maybe_summarize(db, conv_id, total)
+        db.commit()
+    except Exception:
+        db.rollback()
+    finally:
+        db.close()
