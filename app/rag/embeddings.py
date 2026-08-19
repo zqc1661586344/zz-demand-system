@@ -31,9 +31,10 @@ def get_embedding_model():
         from langchain_openai import OpenAIEmbeddings
 
         return OpenAIEmbeddings(
-            model=settings.embedding_model or "text-embedding-ada-002",
-            api_key=settings.llm_api_key,
-            base_url=settings.llm_api_base,
+            model=settings.embedding_model or "BAAI/bge-m3",
+            api_key=settings.embedding_api_key,
+            base_url=settings.embedding_api_base,
+            check_embedding_ctx_length=False,
         )
 
     elif provider == "ollama":

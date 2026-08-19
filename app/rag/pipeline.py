@@ -62,6 +62,7 @@ def process_document(doc_id: str) -> None:
         # Mark as processing
         update_document_status(db, doc_id, "processing")
 
+        logger.info(f"the file name is: {doc.filename}, the file type is: {doc.mime_type}")
         # 按文件类型加载文档
         raw_docs = load_document(doc.file_path, doc.mime_type)
 

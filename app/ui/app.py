@@ -115,7 +115,7 @@ def _auto_login() -> str:
 
 def create_app() -> gr.Blocks:
     with gr.Blocks(css=CUSTOM_CSS, title="EnterpISE RAG System", theme=gr.themes.Soft()) as app:
-        auth_state = gr.State(_auto_login)
+        auth_state = gr.State("")
 
         # Persistent states for chat (live outside tabs to survive tab switches)
         chat_msgs_state = gr.State([])
@@ -234,6 +234,11 @@ def create_app() -> gr.Blocks:
             fn=_active_new,
             outputs=[new_conv_btn, history_btn, doc_btn],
         )
+
+        # 页面加载时执行自动登录，把 token 写入 auth_state。
+        # 注意：不能把 _auto_login 作为 gr.State 的默认值（Gradio 不会执行它），
+        # 必须放在 load 事件里，此时后端已在运行、登录请求才会成功。
+        app.load(fn=_auto_login, outputs=[auth_state])
 
         return app
 

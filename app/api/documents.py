@@ -32,28 +32,30 @@ async def upload_document(
     current_user: User = Depends(get_current_user),
 ):
     # Validate file type — check MIME type first, then fall back to extension
-    mime_type = file.content_type or ""
-    ext = ""
-    allowed_exts = {".pdf", ".txt", ".md", ".docx"}
     mime_to_ext = {
         "application/pdf": ".pdf",
         "text/plain": ".txt",
         "text/markdown": ".md",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
     }
-    if mime_type in mime_to_ext:
-        ext = mime_to_ext[mime_type]
-    else:
-        # Fall back to file extension
-        import mimetypes
-        guessed = mimetypes.guess_extension(file.filename or "") or ""
-        if guessed in allowed_exts:
-            ext = guessed
-            # Map extension back to a known MIME type
-            reverse_map = {v: k for k, v in mime_to_ext.items()}
-            mime_type = reverse_map.get(ext, mime_type)
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported file type: {mime_type or file.filename}")
+    ext_to_mime = {v: k for k, v in mime_to_ext.items()}
+
+    # 优先用客户端上报的 Content-Type；命中即采用
+    mime_type = file.content_type or ""
+    if mime_type not in mime_to_ext:
+        # 浏览器对 .md/.txt 等常上报 application/octet-stream，
+        # 改为按文件名后缀反推真实 MIME（用 Path.suffix，确定性更强，
+        # 不依赖 mimetypes 系统数据库在 Windows/macOS/Linux 上的差异）。
+        suffix = Path(file.filename or "").suffix.lower()
+        if suffix in ext_to_mime:
+            mime_type = ext_to_mime[suffix]
+
+    if mime_type not in mime_to_ext:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported file type: {file.filename or mime_type}",
+        )
+    ext = mime_to_ext[mime_type]
 
     # Save file to disk
     os.makedirs(settings.upload_path, exist_ok=True)

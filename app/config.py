@@ -37,11 +37,13 @@ class Settings(BaseSettings):
     # LLM 使用ollama加载的模型配置
     ollama_base_url: str = "http://localhost:11434"
     ollama_model: str = "qwen2.5:7b"
+    ollama_embedding_model: str = "BAAI/bge-m3"
 
     # Embedding 模型配置
     embedding_provider: Literal["openai", "ollama", "test"] = "openai"
-    embedding_model: str = "text-embedding-3-small"
-    ollama_embedding_model: str = "nomic-embed-text"
+    embedding_api_key: str = ""
+    embedding_api_base: str = "https://api.openai.com/v1"
+    embedding_model: str = "BAAI/bge-m3"
 
     # Chroma 向量数据库配置
     chroma_collection_name: str = "documents"
