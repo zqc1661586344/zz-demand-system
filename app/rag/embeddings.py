@@ -8,7 +8,7 @@ from app.config import settings
 class FakeEmbeddings:
     """在不调用外部API的情况下，返回用于测试的零向量。"""
 
-    def __init__(self, dimension: int = 768):
+    def __init__(self, dimension: int = 1024):
         self.dimension = dimension
         self.model_name = "fake"
 

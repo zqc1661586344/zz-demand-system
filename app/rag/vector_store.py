@@ -42,3 +42,13 @@ def similarity_search(query: str, k: int = 5) -> list[Document]:
     """对单个collection进行相似度搜索。"""
     vs = get_vector_store()
     return vs.similarity_search(query, k=k)
+
+
+def mmr_search(
+    query: str, k: int = 5, fetch_k: int = 20, lambda_mult: float = 0.7
+) -> list[Document]:
+    """按 Maximal Marginal Relevance 检索——平衡相关性与多样性。"""
+    vs = get_vector_store()
+    return vs.max_marginal_relevance_search(
+        query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult
+    )

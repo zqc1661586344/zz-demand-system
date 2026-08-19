@@ -47,6 +47,9 @@ class Settings(BaseSettings):
     chroma_collection_name: str = "documents"
     chroma_persist_dir: str = "./data/chroma"
 
+    # 检索算法配置：similarity（默认）/ mmr
+    rag_search_type: Literal["similarity", "mmr"] = "similarity"
+
     # Upload 文件上传存储路径配置
     upload_dir: str = "./data/uploads"
     max_upload_size_mb: int = 50

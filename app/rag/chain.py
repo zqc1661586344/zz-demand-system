@@ -7,7 +7,8 @@ from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
 from app.rag.llms import get_llm
-from app.rag.vector_store import similarity_search
+from app.rag.vector_store import mmr_search, similarity_search
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -93,7 +94,11 @@ def query_rag(
     history_text = format_history(history, summary=summary)
 
     # 检索相关文档
-    docs = similarity_search(query, k=top_k)
+    docs = (
+        mmr_search(query, k=top_k)
+        if settings.rag_search_type == "mmr"
+        else similarity_search(query, k=top_k)
+    )
 
     if not docs:
         return {
@@ -123,7 +128,11 @@ def query_rag_stream(
     """流式RAG查询，逐个token产出，最后一个event包含sources和完整answer。"""
     history_text = format_history(history, summary=summary)
 
-    docs = similarity_search(query, k=top_k)
+    docs = (
+        mmr_search(query, k=top_k)
+        if settings.rag_search_type == "mmr"
+        else similarity_search(query, k=top_k)
+    )
 
     if not docs:
         yield {"type": "token", "data": "No relevant documents found."}
