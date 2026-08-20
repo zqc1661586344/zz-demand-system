@@ -17,6 +17,13 @@ def get_vector_store() -> Chroma:
         collection_name=settings.chroma_collection_name,
         embedding_function=get_embedding_model(),
         persist_directory=str(settings.chroma_persist_path),
+        # 固定用余弦度量（cosine）+ 显式 cosine relevance 换算函数，
+        # 使 relevance_score 语义统一为 1 - cosine_distance（越高越相关），
+        # 且不依赖从索引遗留配置解析度量（可避开 _select_relevance_score_fn 抛错）。
+        # 【注意】该度量只在"创建新 collection"时生效——旧索引需删除重建：
+        #   rm -rf data/chroma
+        collection_metadata={"hnsw:space": "cosine"},
+        relevance_score_fn=lambda distance: 1.0 - distance,
     )
 
 
@@ -52,3 +59,16 @@ def mmr_search(
     return vs.max_marginal_relevance_search(
         query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult
     )
+
+
+def similarity_search_with_relevance(query: str, k: int = 5) -> list[tuple[Document, float]]:
+    """相似度搜索，返回 (Document, relevance_score) 元组列表。
+
+    relevance_score 由 get_vector_store 里显式指定的 cosine 换算函数计算：
+    score = 1 - cosine_distance，值域约 [0, 2]，越高越相关（>1 表示极强相关，
+    正常相关文档通常在 [0, 1] 区间）。由调用方按 rag_min_score 阈值判断是否采用。
+    """
+    vs = get_vector_store()
+    # relevance_score_fn 已在 Chroma 构造时显式给定，因此无论集合实际度量如何，
+    # 这里都会用同一换算逻辑，不会因旧 l2 索引而错乱。
+    return vs.similarity_search_with_relevance_scores(query, k=k)

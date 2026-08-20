@@ -2,12 +2,19 @@
 
 import json
 import os.path
+import threading
 
 import gradio as gr
 import httpx
 
 from app.ui.api_client import BASE_URL, ApiError
 from app.ui.auth_helpers import AuthState, make_api_client
+
+# 串行化消息发送：send_btn.click 与 msg_input.submit 都能触发 send_message_stream，
+# 若同一时刻并发执行，两个生成器会同时读写共享的 msgs_state 列表（append + 修改
+# history[-1]），导致 token 文本与 sources 串到错误的消息上——表现为"偶现的自由聊天
+# 回答下挂上一条错误/多余的 Sources"。用锁保证同一时间只有一个流在写状态。
+_SEND_LOCK = threading.Lock()
 
 # 头像文件路径 — Gradio 通过其自身的文件服务 API 读取这些路径。要换自己的图片，把图片放进 static/ 目录并改下面两行即可（支持 png/jpg/svg 等常见格式）。
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "static")
@@ -55,7 +62,12 @@ def _format_sources(sources: list) -> str:
 
 def send_message_stream(message: str, history: list, conv_id: str, auth_json: str):
     """通过SSE流发送查询——token在聊天机器人中逐步显示。"""
+    # 同一时刻只允许一个流写共享的 history 状态，避免双触发导致文本与来源串位。
+    with _SEND_LOCK:
+        yield from _send_message_stream_locked(message, history, conv_id, auth_json)
 
+
+def _send_message_stream_locked(message: str, history: list, conv_id: str, auth_json: str):
     # Auto-create conversation on first message
     if not conv_id:
         client = make_api_client(auth_json)
@@ -90,11 +102,17 @@ def send_message_stream(message: str, history: list, conv_id: str, auth_json: st
                         history[-1] = {"role": "assistant", "content": assistant_msg}
                         yield history, history, conv_id, ""
                     elif data.get("done"):
-                        history[-1]["content"] += _format_sources(data.get("sources", []))
+                        # 用本流的权威 assistant_msg 重写消息内容，
+                        # 而不是在 history[-1] 上累加，防止残留/错位。
+                        sources = data.get("sources", [])
+                        history[-1] = {
+                            "role": "assistant",
+                            "content": assistant_msg + _format_sources(sources),
+                        }
                         yield history, history, conv_id, ""
         except Exception as e:
             if not assistant_msg:
-                history[-1]["content"] = f"> ⚠️ **出错了：** {e}"
+                history[-1] = {"role": "assistant", "content": f"> ⚠️ **出错了：** {e}"}
                 yield history, history, conv_id, ""
 
 

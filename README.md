@@ -79,8 +79,11 @@ LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8001
 # 开发模式
 uvicorn app.main:app --reload --port 8001
 
-# 生产模式
+# 生产模式（前台）
 uvicorn app.main:app --host 0.0.0.0 --port 8001
+
+# 生产模式（后台运行，日志写入 /tmp/rag.log）— 完整步骤见「生产部署」一节
+nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 > /tmp/rag.log 2>&1 &
 ```
 
 ### 4. 访问应用
@@ -217,7 +220,29 @@ curl -X POST http://localhost:8001/api/conversations/<conv-id>/query \
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-### 2. 迁移到 PostgreSQL
+### 2. 后台运行（简单起步）
+
+在服务器项目根目录，用 `nohup` 让服务在后台运行，日志写入文件：
+
+```bash
+nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 > /tmp/rag.log 2>&1 &
+
+# 验证
+curl http://localhost:8001/api/health
+# → {"status":"ok","version":"0.1.0"}
+
+# 看日志
+tail -f /tmp/rag.log
+# 停止（用 pgrep 查到的 PID）
+pgrep -af uvicorn   # 记下第一列的 PID
+kill <PID>
+```
+
+> 说明：多进程建议用 `gunicorn`（`gunicorn app.main:app -k uvicorn.workers.UvicornWorker ...`）；
+> 需要开机自启/崩了自动重启，见下方 systemd 一节。若 gunicorn 引导 worker 报 `Worker failed to boot / code 3`，
+> 多为 gunicorn 与 uvicorn 版本不兼容，直接用上面的单进程 uvicorn 最稳妥。
+
+### 3. 迁移到 PostgreSQL
 
 ```bash
 # 安装 PostgreSQL 依赖
@@ -230,7 +255,7 @@ DATABASE_URL=postgresql://user:password@host:5432/rag_db
 alembic upgrade head
 ```
 
-### 3. 使用 Nginx 反向代理
+### 4. 使用 Nginx 反向代理
 
 ```nginx
 server {
@@ -248,7 +273,7 @@ server {
 }
 ```
 
-### 4. 使用 systemd 管理服务
+### 5. 使用 systemd 管理服务
 
 ```ini
 [Unit]

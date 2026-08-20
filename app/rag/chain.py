@@ -6,9 +6,9 @@ from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
-from app.rag.llms import get_llm
-from app.rag.vector_store import mmr_search, similarity_search
 from app.config import settings
+from app.rag.llms import get_llm
+from app.rag.vector_store import mmr_search, similarity_search_with_relevance
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +86,60 @@ def build_rag_chain():
     return _rag_chain
 
 
+# RAG 检索为空时的"自由聊天"提示词——不依赖文档上下文，纯 LLM 自身知识回答。
+FREE_CHAT_PROMPT = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            "You are a helpful assistant. The user's question was checked against an "
+            "internal knowledge base but no relevant document was found. Answer the "
+            "user's question based on your own knowledge. Start your answer with the "
+            "fixed notice: '当前已有文档中找不到答案，以下由大模型自身知识回答：'. If you are "
+            "unsure, say so honestly.\n\n"
+            "Conversation history:\n{history}",
+        ),
+        ("human", "{question}"),
+    ]
+)
+
+# 自由聊天链缓存
+_free_chat_chain = None
+
+
+def _build_free_chat_chain():
+    """构建或返回自由聊天链缓存（无文档上下文，纯 LLM 回答）。"""
+    global _free_chat_chain
+
+    if _free_chat_chain is None:
+        llm = get_llm()
+        _free_chat_chain = FREE_CHAT_PROMPT | llm | StrOutputParser()
+
+    return _free_chat_chain
+
+
+def _retrieve_relevant_docs(query: str, top_k: int) -> list:
+    """按配置的检索算法取回文档，并用相关性阈值过滤掉不相关的结果。
+
+    返回的列表为空表示"文档中没有相关内容"，调用方应回退到自由聊天。
+    """
+    if settings.rag_search_type == "mmr":
+        # MMR 不直接返回距离分，此处保持与阈值无关（文档非空即视为相关）。
+        return mmr_search(query, k=top_k)
+
+    scored = similarity_search_with_relevance(query, k=top_k)
+    # 诊断日志：打印本次检索的实际相关性分数，便于判断阈值是否合理、
+    # 或是否因旧的 l2 索引导致分数失真（分数远超出 [0,1] 即说明索引不是 cosine）。
+    logger.info(
+        "检索 query=%r scores=%s 阈值=%s → 保留文档数=%d",
+        query[:50],
+        [round(s, 3) for _, s in scored],
+        settings.rag_min_score,
+        sum(1 for _, s in scored if s >= settings.rag_min_score),
+    )
+    # 相关性分数低于阈值的认定为"文档中找不到相关内容"
+    return [doc for doc, score in scored if score >= settings.rag_min_score]
+
+
 def query_rag(
     query: str, top_k: int = 5, history: list[dict] | None = None, summary: str | None = None
 ) -> dict:
@@ -93,16 +147,15 @@ def query_rag(
     # Format history into prompt context
     history_text = format_history(history, summary=summary)
 
-    # 检索相关文档
-    docs = (
-        mmr_search(query, k=top_k)
-        if settings.rag_search_type == "mmr"
-        else similarity_search(query, k=top_k)
-    )
+    # 检索相关文档（带相关性分数，用于阈值过滤）
+    docs = _retrieve_relevant_docs(query, top_k)
 
     if not docs:
+        # 检索为空或相关性不足 → 不走 RAG，改为纯 LLM 自由聊天（基于自身知识回答，不附带来源）
+        chain = _build_free_chat_chain()
+        answer = chain.invoke({"question": query, "history": history_text})
         return {
-            "answer": "No relevant documents found.",
+            "answer": answer,
             "sources": [],
             "chunks": [],
         }
@@ -128,15 +181,15 @@ def query_rag_stream(
     """流式RAG查询，逐个token产出，最后一个event包含sources和完整answer。"""
     history_text = format_history(history, summary=summary)
 
-    docs = (
-        mmr_search(query, k=top_k)
-        if settings.rag_search_type == "mmr"
-        else similarity_search(query, k=top_k)
-    )
+    docs = _retrieve_relevant_docs(query, top_k)
 
     if not docs:
-        yield {"type": "token", "data": "No relevant documents found."}
-        yield {"type": "sources", "data": [], "full_answer": "No relevant documents found."}
+        chain = _build_free_chat_chain()
+        full_answer = ""
+        for chunk in chain.stream({"question": query, "history": history_text}):
+            full_answer += chunk
+            yield {"type": "token", "data": chunk}
+        yield {"type": "sources", "data": [], "full_answer": full_answer}
         return
 
     context = format_context(docs)

@@ -52,6 +52,10 @@ class Settings(BaseSettings):
     # 检索算法配置：similarity（默认）/ mmr
     rag_search_type: Literal["similarity", "mmr"] = "similarity"
 
+    # RAG 相关性阈值：检索结果的相关性分数（0~1，越高越相关）低于该值时，
+    # 视为"文档中找不到相关内容"，回退到大模型自由聊天。
+    rag_min_score: float = 0.4
+
     # Upload 文件上传存储路径配置
     upload_dir: str = "./data/uploads"
     max_upload_size_mb: int = 50

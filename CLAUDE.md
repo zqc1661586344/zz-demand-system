@@ -31,6 +31,11 @@ uvicorn app.main:app --reload --port 8001
 # 测试模式启动（无外部 LLM API，用本地 mock）
 LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8001
 
+# 生产/服务器后台启动（在项目根目录，日志写入 /tmp/rag.log）
+nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 > /tmp/rag.log 2>&1 &
+# 验证：curl http://localhost:8001/api/health
+# 看日志：tail -f /tmp/rag.log ；停止：pgrep -af uvicorn 后 kill <PID>
+
 # lint / 类型检查
 ruff check .            # 已配置：--target-version=py311 --line-length=100
 
@@ -44,7 +49,6 @@ pytest                  # dev extra 下的单元测试
 | 端口 | 用途 |
 |------|------|
 | `8001` | **当前实际使用的后端端口**（`app/ui/api_client.py` 中 `BASE_URL`） |
-| `8000` | README 与 test_e2e.py 里仍写的旧端口，**尚未统一** |
 
 改动涉及前后端调用时，务必确认端口一致。`BASE_URL` 的单一事实来源是 `app/ui/api_client.py`。
 
@@ -104,5 +108,5 @@ JWT（python-jose）+ bcrypt，RBAC 三角色 `admin`/`editor`/`viewer`（启动
 ### 已知技术债 / 未完成项
 
 - **Task #21（长期挂起）**：Gradio 文件上传在子路径挂载（`/ui`）下有问题，一直未处理。
-- **端口已统一为 8001**：README、CLAUDE.md、`api_client.py`、`test_e2e.py`(BASE) 均已改；⚠️ `test_e2e.py:174` 健康检查仍残留 `http://localhost:8000/api/health`，调用前需改。
+- **生产部署注意**：gunicorn（`-k uvicorn.workers.UvicornWorker`）在部分 gunicorn/uvicorn 版本组合下会 `Worker failed to boot / code 3`，已验证**用单进程 `uvicorn` 后台跑最稳**（命令见上「常用命令」）；多进程/自启用 systemd 前需先核对 gunicorn 与 uvicorn 版本。
 - `app/rag/llms.py`、`embeddings.py` 里 `provider == "local"` 分支实际未启用（配置枚举只允许 `openai`/`ollama`/`test`）。
