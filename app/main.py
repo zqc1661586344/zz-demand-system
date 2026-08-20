@@ -103,4 +103,6 @@ if __name__ == "__main__":
     static_dir = os.path.abspath("app/ui/static")
     os.environ.setdefault("GRADIO_ALLOWED_PATHS", static_dir)
 
-    uvicorn.run("app.main:app", host="0.0.0.0", port=8000, reload=True)
+    # 本地直跑（python app/main.py）用的端口，与项目约定的 8001 保持一致。
+    # 生产部署请用 uvicorn/gunicorn 指定端口，不要走这个 reload 开发分支。
+    uvicorn.run("app.main:app", host="0.0.0.0", port=8001, reload=True)
