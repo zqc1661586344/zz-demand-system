@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键启动脚本：后端 (8001) + Chainlit 前端 (8002)
+# 一键启动脚本：后端 (8001) + Streamlit 前端 (8002)
 # 使用：bash start.sh
 
 set -e
@@ -20,9 +20,8 @@ for i in $(seq 1 30); do
     sleep 1
 done
 
-echo "=== 启动 Chainlit 前端 (端口 8002) ==="
-# 清空 DATABASE_URL 避免 Chainlit 误用 SQLite 连接串去连 asyncpg
-DATABASE_URL= chainlit run app/chainlit_app/app.py --port 8002 &
+echo "=== 启动 Streamlit 前端 (端口 8002) ==="
+streamlit run app/streamlit_app/app.py --server.port 8002 --server.headless true &
 FRONTEND_PID=$!
 
 echo ""

@@ -1,4 +1,0 @@
-[project]
-# 禁用 Chainlit 内置数据库层 —— 数据持久化由 FastAPI 后端统一管理。
-# 必须设为 "memory"，否则会读取 DATABASE_URL 环境变量并尝试用 asyncpg 连接。
-database = "memory"
