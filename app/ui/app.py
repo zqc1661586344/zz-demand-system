@@ -113,6 +113,35 @@ def _auto_login() -> str:
     return ""
 
 
+def _restore_last_conversation(auth_json: str) -> tuple[list, list, str]:
+    """页面刷新时自动加载最近一次对话，避免回到空白「新对话」。
+
+    返回 3 个值：(chatbot显示用消息列表, state用消息列表, conv_id)
+    前两个是同一个列表，Gradio 需要分别发给 chatbot 组件和 gr.State。
+    """
+    if not auth_json:
+        return [], [], ""
+
+    from app.ui.api_client import ApiError
+    from app.ui.auth_helpers import make_api_client
+
+    client = make_api_client(auth_json)
+    try:
+        convs = client.get("/api/conversations?limit=1&skip=0")
+        if not convs:
+            return [], [], ""
+        conv = convs[0]
+        conv_id = conv["id"]
+        msgs = client.get(f"/api/conversations/{conv_id}/messages?limit=200")
+        history = [
+            {"role": "user" if m["role"] == "user" else "assistant", "content": m["content"]}
+            for m in msgs
+        ]
+        return history, history, conv_id
+    except ApiError:
+        return [], [], ""
+
+
 def create_app() -> gr.Blocks:
     with gr.Blocks(css=CUSTOM_CSS, title="EnterpISE RAG System", theme=gr.themes.Soft()) as app:
         auth_state = gr.State("")
@@ -208,7 +237,8 @@ def create_app() -> gr.Blocks:
         # History table row click → load that conversation in chat
         def load_conversation(evt: gr.SelectData, auth_json: str):
             """When a row is clicked in history table, load messages into chat."""
-            from app.ui.api_client import ApiError, make_api_client
+            from app.ui.api_client import ApiError
+            from app.ui.auth_helpers import make_api_client
 
             row_data = evt.value
             conv_id = row_data[0]  # First column is the conversation ID
@@ -238,7 +268,11 @@ def create_app() -> gr.Blocks:
         # 页面加载时执行自动登录，把 token 写入 auth_state。
         # 注意：不能把 _auto_login 作为 gr.State 的默认值（Gradio 不会执行它），
         # 必须放在 load 事件里，此时后端已在运行、登录请求才会成功。
-        app.load(fn=_auto_login, outputs=[auth_state])
+        app.load(fn=_auto_login, outputs=[auth_state]).then(
+            fn=_restore_last_conversation,
+            inputs=[auth_state],
+            outputs=[chat_refs["chatbot"], chat_msgs_state, chat_conv_id_state],
+        )
 
         return app
 
