@@ -93,8 +93,7 @@ FREE_CHAT_PROMPT = ChatPromptTemplate.from_messages(
             "system",
             "You are a helpful assistant. The user's question was checked against an "
             "internal knowledge base but no relevant document was found. Answer the "
-            "user's question based on your own knowledge. Start your answer with the "
-            "fixed notice: '当前已有文档中找不到答案，以下由大模型自身知识回答：'. If you are "
+            "user's question based on your own knowledge. If you are "
             "unsure, say so honestly.\n\n"
             "Conversation history:\n{history}",
         ),
@@ -152,10 +151,11 @@ def query_rag(
 
     if not docs:
         # 检索为空或相关性不足 → 不走 RAG，改为纯 LLM 自由聊天（基于自身知识回答，不附带来源）
+        prefix = "**当前已有文档中找不到答案，以下由大模型自身知识回答：**\n\n"
         chain = _build_free_chat_chain()
         answer = chain.invoke({"question": query, "history": history_text})
         return {
-            "answer": answer,
+            "answer": prefix + answer,
             "sources": [],
             "chunks": [],
         }
@@ -184,8 +184,10 @@ def query_rag_stream(
     docs = _retrieve_relevant_docs(query, top_k)
 
     if not docs:
+        prefix = "**当前已有文档中找不到答案，以下由大模型自身知识回答：**\n\n"
+        full_answer = prefix
+        yield {"type": "token", "data": prefix}
         chain = _build_free_chat_chain()
-        full_answer = ""
         for chunk in chain.stream({"question": query, "history": history_text}):
             full_answer += chunk
             yield {"type": "token", "data": chunk}

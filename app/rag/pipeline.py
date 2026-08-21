@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.database import SessionLocal
 from app.models.document import Document as DocModel
 from app.rag.splitters import get_default_splitter
-from app.rag.vector_store import add_documents_to_store
+from app.rag.vector_store import add_documents_to_store, delete_documents_from_store
 from app.services.document_service import update_document_status
 
 logger = logging.getLogger(__name__)
@@ -80,6 +80,9 @@ def process_document(doc_id: str) -> None:
             update_document_status(db, doc_id, "indexed", chunk_count=0)
             logger.info(f"Document {doc_id}: empty after splitting, marked indexed")
             return
+
+        # 清理该文档在 Chroma 中的旧向量（防止重复处理时累积孤儿条目）
+        delete_documents_from_store(str(doc.id))
 
         # 存入向量数据库
         add_documents_to_store(chunks)

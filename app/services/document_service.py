@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.document import Document
+from app.rag.vector_store import delete_documents_from_store
 
 
 def create_document(
@@ -45,6 +46,8 @@ def delete_document(db: Session, doc_id: str) -> bool:
     doc = get_document_by_id(db, doc_id)
     if doc is None:
         return False
+    # Remove from vector store first (Chroma — by document_id metadata)
+    delete_documents_from_store(doc_id)
     # Remove file from disk
     if doc.file_path and os.path.exists(doc.file_path):
         os.remove(doc.file_path)

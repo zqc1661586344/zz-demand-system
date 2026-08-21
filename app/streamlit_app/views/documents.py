@@ -45,11 +45,14 @@ def page():
     uploaded_file = st.file_uploader(
         "选择文件",
         type=SUPPORTED_EXTENSIONS,
-        help=f"支持 {', '.join(SUPPORTED_EXTENSIONS)}，最大 {MAX_SIZE_MB}MB",
+        help=f"支持 {', '.join(SUPPORTED_EXTENSIONS)}，最大 {MAX_SIZE_MB}MB，选中后点击「上传」按钮开始上传",
         key=f"file_uploader_{upload_key}",
     )
 
-    if uploaded_file is not None and st.session_state.get("_upload_handled") is None:
+    # "上传"按钮——选好文件后点击确认才上传，而不是自动触发
+    upload_clicked = st.button("上传", key=f"upload_btn_{upload_key}", type="primary", disabled=uploaded_file is None)
+
+    if uploaded_file is not None and upload_clicked and st.session_state.get("_upload_handled") is None:
         if uploaded_file.size > MAX_SIZE_MB * 1024 * 1024:
             st.error(f"文件过大（{_format_size(uploaded_file.size)}），最大 {MAX_SIZE_MB}MB")
         else:
@@ -90,7 +93,7 @@ def page():
         st.info("暂无文档，请上传。")
         return
 
-    # Table view
+    # Build table data
     table_data = []
     for doc in docs:
         table_data.append(
@@ -104,28 +107,65 @@ def page():
             }
         )
 
-    # Display as a simple table with delete buttons
+    # 初始化选中集合
+    if "selected_docs" not in st.session_state:
+        st.session_state["selected_docs"] = set()
+
+    # ---- Document table with checkboxes ----
     for i, row in enumerate(table_data):
-        col1, col2, col3, col4, col5, col6 = st.columns([3, 1, 1, 1, 2, 1])
-        with col1:
+        c_check, c_name, c_status, c_size, c_chunks, c_time, c_del = st.columns(
+            [0.5, 3, 1, 1, 1, 2, 0.8]
+        )
+        doc_id = row["id"]
+
+        with c_check:
+            checked = st.checkbox(
+                " ",
+                key=f"sel_{doc_id}",
+                value=doc_id in st.session_state["selected_docs"],
+                label_visibility="hidden",
+            )
+            if checked:
+                st.session_state["selected_docs"].add(doc_id)
+            else:
+                st.session_state["selected_docs"].discard(doc_id)
+
+        with c_name:
             st.markdown(f"📄 **{row['文件名']}**")
-        with col2:
+        with c_status:
             st.caption(f"状态: {row['状态']}")
-        with col3:
+        with c_size:
             st.caption(f"大小: {row['大小']}")
-        with col4:
+        with c_chunks:
             st.caption(f"分块: {row['分块数']}")
-        with col5:
+        with c_time:
             st.caption(row["上传时间"])
-        with col6:
-            if st.button("🗑", key=f"del_{row['id']}", help="删除"):
+        with c_del:
+            if st.button("🗑", key=f"del_{doc_id}", help="删除"):
                 try:
-                    delete(f"/api/documents/{row['id']}")
-                    st.success("✅ 文档已删除")
-                    # Refresh list immediately before rerun so the new state is ready
+                    delete(f"/api/documents/{doc_id}")
+                    st.session_state["selected_docs"].discard(doc_id)
                     _refresh_doc_list()
                     st.rerun()
                 except ApiError as e:
                     st.error(f"删除失败：{e.detail}")
+
+    # ---- Batch delete button (放在表格之后，确保 selected_docs 已是最新值) ----
+    if st.session_state["selected_docs"]:
+        st.markdown("---")
+        st.warning(f"已选中 {len(st.session_state['selected_docs'])} 个文档")
+        if st.button(
+            f"🗑 批量删除（{len(st.session_state['selected_docs'])} 个）",
+            type="primary",
+            use_container_width=True,
+        ):
+            for doc_id in list(st.session_state["selected_docs"]):
+                try:
+                    delete(f"/api/documents/{doc_id}")
+                except ApiError as e:
+                    st.error(f"删除失败（{doc_id}）：{e.detail}")
+            st.session_state["selected_docs"].clear()
+            _refresh_doc_list()
+            st.rerun()
 
     st.caption(f"共 {len(docs)} 个文档")

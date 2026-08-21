@@ -1,5 +1,6 @@
 """Chroma vector store wrapper — single collection for all documents."""
 
+import logging
 from functools import lru_cache
 
 from langchain_chroma import Chroma
@@ -8,6 +9,8 @@ from langchain_core.vectorstores import VectorStoreRetriever
 
 from app.config import settings
 from app.rag.embeddings import get_embedding_model
+
+logger = logging.getLogger(__name__)
 
 
 @lru_cache
@@ -33,10 +36,21 @@ def add_documents_to_store(docs: list[Document]) -> list[str]:
     return vs.add_documents(docs)
 
 
-def delete_documents_from_store(doc_ids: list[str]) -> None:
-    """根据ID从Chroma collection中删除文档。"""
-    vs = get_vector_store()
-    vs.delete(doc_ids)
+def delete_documents_from_store(doc_id: str) -> None:
+    """根据document_id元数据从Chroma collection中删除所有相关向量。
+
+    由于 add_documents_to_store 在入库时已将 document_id 写入每个 chunk 的 metadata，
+    这里通过 where 过滤条件精准删除该文档的全部向量，无需事先保存 Chroma 内部 ID。
+
+    pipeline.py 的 process_document 在重新处理前也应调用此函数，避免重复累积。
+    """
+    try:
+        vs = get_vector_store()
+        logger.info(f"Chroma delete: removing vectors with where={{document_id: {doc_id!r}}}")
+        vs.delete(where={"document_id": {"$eq": doc_id}})
+        logger.info(f"Chroma delete: successfully removed vectors for document {doc_id}")
+    except Exception as e:
+        logger.exception(f"Chroma delete failed for document {doc_id}: {e}")
 
 
 def get_retriever(k: int = 5) -> VectorStoreRetriever:
