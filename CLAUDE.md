@@ -2,7 +2,7 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
-Enterprise RAG 文档问答系统 — FastAPI 后端 + LangChain RAG + Gradio 前端。中文文档为主。
+Enterprise RAG 文档问答系统 — FastAPI 后端 + LangChain RAG + Chainlit 前端。中文文档为主。
 
 ## 运行时必须遵守的原则
 
@@ -25,13 +25,13 @@ Enterprise RAG 文档问答系统 — FastAPI 后端 + LangChain RAG + Gradio �
 uv sync                 # 基础依赖
 uv sync --extra ollama  # 需要本地 Ollama 时
 
-# 启动后端（开发模式）—— 注意当前实际运行端口是 8001
+# 启动服务（开发模式，单个进程挂载了 Chainlit 前端）
 uvicorn app.main:app --reload --port 8001
 
 # 测试模式启动（无外部 LLM API，用本地 mock）
 LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8001
 
-# 生产/服务器后台启动（在项目根目录，日志写入 /tmp/rag.log）
+# 生产/服务器后台启动
 nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 > /tmp/rag.log 2>&1 &
 # 验证：curl http://localhost:8001/api/health
 # 看日志：tail -f /tmp/rag.log ；停止：pgrep -af uvicorn 后 kill <PID>
@@ -48,9 +48,10 @@ pytest                  # dev extra 下的单元测试
 
 | 端口 | 用途 |
 |------|------|
-| `8001` | **当前实际使用的后端端口**（`app/ui/api_client.py` 中 `BASE_URL`） |
+| `8001` | **后端 + Chainlit 前端挂载在同一进程**（`app/chainlit_app/api_client.py` 中 `BASE_URL`） |
+| `8002` | 保留（仅当需要独立运行 Chainlit 时使用） |
 
-改动涉及前后端调用时，务必确认端口一致。`BASE_URL` 的单一事实来源是 `app/ui/api_client.py`。
+改动涉及前后端调用时，务必确认端口一致。`BASE_URL` 的单一事实来源是 `app/chainlit_app/api_client.py`。
 
 ### 环境/配置要点
 
@@ -72,8 +73,8 @@ app/
 ├── services/     # 业务逻辑（document/conversation/auth/user/workflow）
 ├── rag/          # RAG 核心：chain / pipeline / vector_store / llms / embeddings / splitters
 ├── workflows/    # 业务流程引擎（文档审批、问题升级示例）
-├── ui/           # Gradio 前端：app.py 主入口 + pages/ + components/ + api_client.py + auth_helpers.py
-└── main.py       # FastAPI 入口，挂载 API 路由 + 在 /ui 挂载 Gradio
+├── chainlit_app/ # Chainlit 前端：app.py 主入口 + api_client.py + auth.py + chat_handler.py + document_handler.py + chainlit.md
+└── main.py       # FastAPI 入口，挂载 API 路由
 ```
 
 ### 关键依赖链（改代码前先看这条链路）
@@ -91,11 +92,11 @@ app/
 
 ### 两点最容易踩的坑
 
-1. **前后端端口/地址依赖**：Gradio 前端通过 httpx 调 FastAPI，`BASE_URL` 在 `app/ui/api_client.py` 唯一定义。改动端口/挂载路径要同步。
+1. **前后端端口/地址依赖**：Chainlit 前端通过 httpx 调 FastAPI，`BASE_URL` 在 `app/chainlit_app/api_client.py` 唯一定义。改动端口要同步。
 
 2. **对话状态的持久化方式**：
    - 普通查询 `POST /api/conversations/{id}/query`：同步保存消息。
-   - 流式查询 `.../query/stream`：SSE (`text/event-stream`) 逐 token 返回，消息靠 `BackgroundTasks` 在流结束后异步入库。SSE 协议、错误处理在 `app/ui/pages/chat.py` 的 `_iter_sse_events`/`_raise_for_status`/`_format_sources` 三个 helper 中实现。
+   - 流式查询 `.../query/stream`：SSE (`text/event-stream`) 逐 token 返回，消息靠 `BackgroundTasks` 在流结束后异步入库。SSE 协议在 `app/chainlit_app/chat_handler.py` 的 `handle_query` 中实现（`resp.aiter_lines()` 解析 `data: ` 前缀事件）。
 
 ### 会话摘要机制（多轮对话）
 
@@ -103,10 +104,9 @@ app/
 
 ### 认证
 
-JWT（python-jose）+ bcrypt，RBAC 三角色 `admin`/`editor`/`viewer`（启动时 `app/database.py::_seed_roles` 播种）。`app/dependencies.py` 提供 `get_current_user` / `require_roles(*roles)` / `optional_current_user`。Gradio 侧 `AuthState`（`app/ui/auth_helpers.py`）序列化存 `gr.State`，`app/ui/api_client.py::ApiClient` 自动注入 Bearer token 并在 401 时用 refresh token 重试一次。
+JWT（python-jose）+ bcrypt，RBAC 三角色 `admin`/`editor`/`viewer`（启动时 `app/database.py::_seed_roles` 播种）。`app/dependencies.py` 提供 `get_current_user` / `require_roles(*roles)` / `optional_current_user`。Chainlit 侧 `app/chainlit_app/auth.py` 自动登录，`ApiClient`（`app/chainlit_app/api_client.py`）自动注入 Bearer token 并在 401 时用 refresh token 重试一次。
 
 ### 已知技术债 / 未完成项
 
-- **Task #21（长期挂起）**：Gradio 文件上传在子路径挂载（`/ui`）下有问题，一直未处理。
 - **生产部署注意**：gunicorn（`-k uvicorn.workers.UvicornWorker`）在部分 gunicorn/uvicorn 版本组合下会 `Worker failed to boot / code 3`，已验证**用单进程 `uvicorn` 后台跑最稳**（命令见上「常用命令」）；多进程/自启用 systemd 前需先核对 gunicorn 与 uvicorn 版本。
 - `app/rag/llms.py`、`embeddings.py` 里 `provider == "local"` 分支实际未启用（配置枚举只允许 `openai`/`ollama`/`test`）。

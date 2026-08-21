@@ -1,29 +1,15 @@
 """FastAPI application entry point."""
 
-import os
-
-# Allow Gradio file server to serve avatar SVGs from static directory
-_STATIC_DIR = os.path.abspath("app/ui/static")
-if os.path.isdir(_STATIC_DIR):
-    existing = os.environ.get("GRADIO_ALLOWED_PATHS", "")
-    parts = [p for p in existing.split(",") if p]
-    if _STATIC_DIR not in parts:
-        parts.append(_STATIC_DIR)
-        os.environ["GRADIO_ALLOWED_PATHS"] = ",".join(parts)
-
 from contextlib import asynccontextmanager
 
-import gradio as gr
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 from sqlalchemy.orm import Session
 
 from app.api.router import api_router
 from app.database import init_db, SessionLocal
 from app.models.user import User, Role
 from app.services.auth_service import hash_password
-from app.ui.app import app as gradio_app
 
 
 def _seed_demo_user():
@@ -65,7 +51,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow Gradio frontend (same-origin or proxy)
+# CORS — allow all origins for development
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -77,12 +63,6 @@ app.add_middleware(
 # Mount API routes
 app.include_router(api_router)
 
-# Mount UI static files (avatars, etc.) — must be before Gradio mount
-app.mount("/static", StaticFiles(directory="app/ui/static"), name="ui-static")
-
-# Mount Gradio frontend at /ui
-app = gr.mount_gradio_app(app, gradio_app, path="/ui")
-
 
 @app.get("/api/health")
 def health():
@@ -91,17 +71,11 @@ def health():
 
 @app.get("/")
 def root():
-    return {"message": "Enterprise RAG System", "docs": "/docs", "ui": "/ui"}
+    return {"message": "Enterprise RAG System", "docs": "/docs"}
 
 
 if __name__ == "__main__":
     import uvicorn
-
-    # Required for Gradio sub-app
-    os.environ.setdefault("GRADIO_SERVER_NAME", "0.0.0.0")
-    # Allow Gradio to serve avatar files via its /gradio_api/file= endpoint
-    static_dir = os.path.abspath("app/ui/static")
-    os.environ.setdefault("GRADIO_ALLOWED_PATHS", static_dir)
 
     # 本地直跑（python app/main.py）用的端口，与项目约定的 8001 保持一致。
     # 生产部署请用 uvicorn/gunicorn 指定端口，不要走这个 reload 开发分支。

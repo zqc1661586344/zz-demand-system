@@ -1,4 +1,4 @@
-"""Gradio HTTP API client — wraps httpx to call FastAPI backend with JWT auth."""
+"""Async HTTP API client — wraps httpx to call FastAPI backend with JWT auth."""
 
 import logging
 from typing import Any
@@ -10,13 +10,30 @@ logger = logging.getLogger(__name__)
 BASE_URL = "http://localhost:8001"
 
 
-class ApiClient:
-    """HTTP client for FastAPI backend, auto-injects JWT tokens."""
+class ApiError(Exception):
+    def __init__(self, status_code: int, detail: str):
+        self.status_code = status_code
+        self.detail = detail
+        super().__init__(f"API {status_code}: {detail}")
 
-    def __init__(self, access_token: str | None = None, refresh_token: str | None = None):
+
+class ApiClient:
+    """Async HTTP client for FastAPI backend, auto-injects JWT tokens.
+
+    Token retrieval is delegated to the caller (Chainlit session).
+    """
+
+    def __init__(
+        self,
+        access_token: str | None = None,
+        refresh_token: str | None = None,
+    ):
         self.access_token = access_token
         self.refresh_token = refresh_token
-        self._client = httpx.Client(base_url=BASE_URL, timeout=30.0)
+        self._client = httpx.AsyncClient(base_url=BASE_URL, timeout=30.0)
+
+    async def close(self):
+        await self._client.aclose()
 
     def _headers(self) -> dict[str, str]:
         headers = {"Content-Type": "application/json"}
@@ -24,12 +41,12 @@ class ApiClient:
             headers["Authorization"] = f"Bearer {self.access_token}"
         return headers
 
-    def _try_refresh(self) -> bool:
+    async def _try_refresh(self) -> bool:
         """Attempt to refresh the access token. Returns True on success."""
         if not self.refresh_token:
             return False
         try:
-            resp = self._client.post(
+            resp = await self._client.post(
                 "/api/auth/refresh",
                 json={"refresh_token": self.refresh_token},
             )
@@ -42,18 +59,18 @@ class ApiClient:
             logger.exception("Token refresh failed")
         return False
 
-    def request(self, method: str, path: str, **kwargs) -> Any:
+    async def request(self, method: str, path: str, **kwargs) -> Any:
         """Make an HTTP request. Auto-retries on 401 after a token refresh."""
         headers = self._headers()
         if "headers" in kwargs:
             headers.update(kwargs.pop("headers"))
 
-        resp = self._client.request(method, path, headers=headers, **kwargs)
+        resp = await self._client.request(method, path, headers=headers, **kwargs)
 
         if resp.status_code == 401 and self.refresh_token:
-            if self._try_refresh():
+            if await self._try_refresh():
                 headers = self._headers()
-                resp = self._client.request(method, path, headers=headers, **kwargs)
+                resp = await self._client.request(method, path, headers=headers, **kwargs)
 
         if resp.status_code >= 400:
             try:
@@ -67,30 +84,30 @@ class ApiClient:
         except Exception:
             return resp.text
 
-    def get(self, path: str, **kwargs) -> Any:
-        return self.request("GET", path, **kwargs)
+    async def get(self, path: str, **kwargs) -> Any:
+        return await self.request("GET", path, **kwargs)
 
-    def post(self, path: str, **kwargs) -> Any:
-        return self.request("POST", path, **kwargs)
+    async def post(self, path: str, **kwargs) -> Any:
+        return await self.request("POST", path, **kwargs)
 
-    def put(self, path: str, **kwargs) -> Any:
-        return self.request("PUT", path, **kwargs)
+    async def put(self, path: str, **kwargs) -> Any:
+        return await self.request("PUT", path, **kwargs)
 
-    def delete(self, path: str, **kwargs) -> Any:
-        return self.request("DELETE", path, **kwargs)
+    async def delete(self, path: str, **kwargs) -> Any:
+        return await self.request("DELETE", path, **kwargs)
 
-    def upload(self, path: str, files: dict, data: dict | None = None) -> Any:
+    async def upload(self, path: str, files: dict, data: dict | None = None) -> Any:
         """Upload a file via multipart POST."""
         headers = {}
         if self.access_token:
             headers["Authorization"] = f"Bearer {self.access_token}"
 
-        resp = self._client.post(path, data=data, files=files, headers=headers)
+        resp = await self._client.post(path, data=data, files=files, headers=headers)
 
         if resp.status_code == 401 and self.refresh_token:
-            if self._try_refresh():
+            if await self._try_refresh():
                 headers["Authorization"] = f"Bearer {self.access_token}"
-                resp = self._client.post(path, data=data, files=files, headers=headers)
+                resp = await self._client.post(path, data=data, files=files, headers=headers)
 
         if resp.status_code >= 400:
             try:
@@ -100,10 +117,3 @@ class ApiClient:
             raise ApiError(resp.status_code, detail)
 
         return resp.json()
-
-
-class ApiError(Exception):
-    def __init__(self, status_code: int, detail: str):
-        self.status_code = status_code
-        self.detail = detail
-        super().__init__(f"API {status_code}: {detail}")
