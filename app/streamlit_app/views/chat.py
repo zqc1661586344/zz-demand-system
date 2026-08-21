@@ -34,9 +34,20 @@ def _load_messages(conv_id: str):
     """Load conversation history and populate chat_message list in session state."""
     try:
         msgs = request("GET", f"/api/conversations/{conv_id}/messages")
-        st.session_state["conv_messages"] = [
-            {"role": m["role"], "content": m["content"]} for m in msgs
-        ]
+        conv_messages = []
+        for m in msgs:
+            entry = {"role": m["role"], "content": m["content"]}
+            # Backend stores sources as a JSON string; parse it for display
+            raw_sources = m.get("sources")
+            if raw_sources:
+                try:
+                    sources_list = json.loads(raw_sources)
+                    if sources_list:
+                        entry["sources"] = sources_list
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            conv_messages.append(entry)
+        st.session_state["conv_messages"] = conv_messages
     except ApiError as e:
         logger.warning("Failed to load messages: %s", e)
         st.session_state["conv_messages"] = []
@@ -47,6 +58,15 @@ def _display_messages():
     for m in st.session_state["conv_messages"]:
         with st.chat_message(m["role"]):
             st.markdown(m["content"])
+            # Show sources for assistant messages
+            sources = m.get("sources")
+            if sources:
+                source_lines = "\n".join(
+                    f"- 📄 {s.get('filename', 'Unknown')}"
+                    + (f" (p.{s['page']})" if s.get("page") else "")
+                    for s in sources
+                )
+                st.markdown("---\n**📎 来源文档**\n" + source_lines)
 
 
 def page():
@@ -145,10 +165,11 @@ def page():
             )
             st.markdown("---\n**📎 来源文档**\n" + source_lines)
 
-    # Save messages to state for next render
-    st.session_state["conv_messages"].append(
-        {"role": "assistant", "content": full_answer}
-    )
+    # Save messages to state for next render (including sources)
+    entry = {"role": "assistant", "content": full_answer}
+    if sources:
+        entry["sources"] = sources
+    st.session_state["conv_messages"].append(entry)
 
 
 def new_conversation():
