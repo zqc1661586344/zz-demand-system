@@ -42,46 +42,58 @@ def page():
     upload_key = st.session_state.get("_upload_key", 0)
 
     st.markdown("### 上传文档")
-    uploaded_file = st.file_uploader(
+    uploaded_files = st.file_uploader(
         "选择文件",
         type=SUPPORTED_EXTENSIONS,
-        help=f"支持 {', '.join(SUPPORTED_EXTENSIONS)}，最大 {MAX_SIZE_MB}MB，选中后点击「上传」按钮开始上传",
+        accept_multiple_files=True,
+        help=f"支持 {', '.join(SUPPORTED_EXTENSIONS)}，最大 {MAX_SIZE_MB}MB，可多选",
         key=f"file_uploader_{upload_key}",
     )
 
     # "上传"按钮——选好文件后点击确认才上传，而不是自动触发
-    upload_clicked = st.button("上传", key=f"upload_btn_{upload_key}", type="primary", disabled=uploaded_file is None)
+    has_files = uploaded_files is not None and len(uploaded_files) > 0
+    upload_clicked = st.button(
+        "上传", key=f"upload_btn_{upload_key}", type="primary", disabled=not has_files
+    )
 
-    if uploaded_file is not None and upload_clicked and st.session_state.get("_upload_handled") is None:
-        if uploaded_file.size > MAX_SIZE_MB * 1024 * 1024:
-            st.error(f"文件过大（{_format_size(uploaded_file.size)}），最大 {MAX_SIZE_MB}MB")
-        else:
-            with st.spinner(f"上传 {uploaded_file.name}…"):
-                ext = os.path.splitext(uploaded_file.name)[1].lower()
-                mime_map = {
-                    ".pdf": "application/pdf",
-                    ".txt": "text/plain",
-                    ".md": "text/markdown",
-                    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                }
-                mime_type = mime_map.get(ext, "application/octet-stream")
+    if upload_clicked and has_files:
+        mime_map = {
+            ".pdf": "application/pdf",
+            ".txt": "text/plain",
+            ".md": "text/markdown",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        }
 
+        success_count = 0
+        error_count = 0
+        for f in uploaded_files:
+            if f.size > MAX_SIZE_MB * 1024 * 1024:
+                st.error(f"❌ {f.name} 文件过大（{_format_size(f.size)}），最大 {MAX_SIZE_MB}MB")
+                error_count += 1
+                continue
+
+            ext = os.path.splitext(f.name)[1].lower()
+            mime_type = mime_map.get(ext, "application/octet-stream")
+
+            with st.spinner(f"上传 {f.name}…"):
                 with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp:
-                    tmp.write(uploaded_file.getvalue())
+                    tmp.write(f.getvalue())
                     tmp_path = tmp.name
 
                 try:
-                    upload("/api/documents/upload", tmp_path, uploaded_file.name, mime_type)
-                    st.success(f"✅ **{uploaded_file.name}** 上传成功，正在处理中…")
-                    # Mark handled + increment upload key so the widget resets itself
-                    st.session_state["_upload_handled"] = True
-                    st.session_state["_upload_key"] = upload_key + 1
-                    _refresh_doc_list()
-                    st.rerun()
+                    upload("/api/documents/upload", tmp_path, f.name, mime_type)
+                    st.success(f"✅ **{f.name}** 上传成功，正在处理中…")
+                    success_count += 1
                 except ApiError as e:
-                    st.error(f"上传失败：{e.detail}")
+                    st.error(f"❌ {f.name} 上传失败：{e.detail}")
+                    error_count += 1
                 finally:
                     os.unlink(tmp_path)
+
+        # 全部上传完成后，重置控件
+        st.session_state["_upload_key"] = upload_key + 1
+        _refresh_doc_list()
+        st.rerun()
 
     # Document list — only fetch from API if we haven't loaded yet or after mutation
     if st.session_state.get("doc_list") is None:

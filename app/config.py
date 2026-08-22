@@ -19,7 +19,7 @@ class Settings(BaseSettings):
     app_debug: bool = True
     log_level: str = "INFO"
 
-    # Database配置，当前示例选择使用sqlite
+    # Database配置，当前项目选择使用sqlite
     database_url: str = "sqlite:///./data/app.db"
 
     # JWT
@@ -49,8 +49,18 @@ class Settings(BaseSettings):
     chroma_collection_name: str = "documents"
     chroma_persist_dir: str = "./data/chroma"
 
-    # 检索算法配置：similarity（默认）/ mmr
-    rag_search_type: Literal["similarity", "mmr"] = "similarity"
+    # 检索算法配置：similarity（默认）/ mmr（多样性）/ hybrid（向量+BM25+RRF融合）
+    rag_search_type: Literal["similarity", "mmr", "hybrid"] = "hybrid"
+
+    # Hybrid RAG 稠密向量 vs 稀疏关键词权重（0=纯BM25, 1=纯向量）
+    rag_hybrid_alpha: float = 0.5
+
+    # 是否启用 bge-reranker 交叉编码器重排（需 transformers + torch）
+    rag_rerank_enabled: bool = False
+    # 重排器模型名
+    rag_rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # 重排后保留的 top_n 结果
+    rag_rerank_top_n: int = 5
 
     # RAG 相关性阈值：检索结果的相关性分数（0~1，越高越相关）低于该值时，
     # 视为"文档中找不到相关内容"，回退到大模型自由聊天。

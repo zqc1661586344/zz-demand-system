@@ -121,6 +121,24 @@ def _retrieve_relevant_docs(query: str, top_k: int) -> list:
 
     返回的列表为空表示"文档中没有相关内容"，调用方应回退到自由聊天。
     """
+    if settings.rag_search_type == "hybrid":
+        from app.rag.retrievers import hybrid_search
+
+        docs = hybrid_search(query, top_k=top_k)
+        if docs:
+            # 后置过滤：hybrid 的 RRF 分数不是相似度语义，不可直接阈值过滤。
+            # 用稠密检索检查 top-1 的相关性分数——如果连最相关的文档都低于
+            # 阈值，说明 query 与文档集无关，回退到 free chat。
+            scored = similarity_search_with_relevance(query, k=1)
+            if scored and scored[0][1] < settings.rag_min_score:
+                logger.info(
+                    "Hybrid top-1 score=%.3f < min_score=%.3f → 回退自由聊天",
+                    scored[0][1],
+                    settings.rag_min_score,
+                )
+                return []
+        return docs
+
     if settings.rag_search_type == "mmr":
         # MMR 不直接返回距离分，此处保持与阈值无关（文档非空即视为相关）。
         return mmr_search(query, k=top_k)

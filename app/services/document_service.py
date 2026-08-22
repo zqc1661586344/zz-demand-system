@@ -48,6 +48,9 @@ def delete_document(db: Session, doc_id: str) -> bool:
         return False
     # Remove from vector store first (Chroma — by document_id metadata)
     delete_documents_from_store(doc_id)
+    # 同步刷新 BM25 索引（反映删除后的状态）
+    from app.rag.retrievers import refresh_bm25_index_from_chroma
+    refresh_bm25_index_from_chroma()
     # Remove file from disk
     if doc.file_path and os.path.exists(doc.file_path):
         os.remove(doc.file_path)

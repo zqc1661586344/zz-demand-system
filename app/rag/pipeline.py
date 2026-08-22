@@ -11,6 +11,7 @@ from app.models.document import Document as DocModel
 from app.rag.splitters import get_default_splitter
 from app.rag.vector_store import add_documents_to_store, delete_documents_from_store
 from app.services.document_service import update_document_status
+from app.rag.retrievers import refresh_bm25_index_from_chroma
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +91,10 @@ def process_document(doc_id: str) -> None:
         # 更新数据库状态为indexed
         update_document_status(db, doc_id, "indexed", chunk_count=len(chunks))
         logger.info(f"Document {doc_id}: indexed {len(chunks)} chunks")
+
+        # TODO：记录一个优化
+        # 同步刷新 BM25 索引（让新增内容立即可在 hybrid 模式下检索到）
+        refresh_bm25_index_from_chroma()
 
     except Exception as e:
         logger.exception(f"Document {doc_id} processing failed")
