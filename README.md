@@ -1,10 +1,11 @@
 # Enterprise RAG System
 
-> **企业级 RAG 文档问答系统** — 基于 FastAPI + LangChain + Gradio 构建
+> **企业级 RAG 文档问答系统** — 基于 FastAPI + LangChain + Streamlit 构建
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
 [![LangChain](https://img.shields.io/badge/LangChain-1.3+-orange.svg)](https://python.langchain.com/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.40+-red.svg)](https://streamlit.io/)
 
 ## 📋 项目简介
 
@@ -16,7 +17,7 @@
 - 📄 **文档管理**：PDF/TXT/Markdown/DOCX 上传 → 自动解析 → 分块 → 向量化索引，所有文档统一检索
 - 💬 **RAG 问答**：基于全部文档上下文的智能问答，附带来源引用
 - 🔄 **业务流程**：内置文档审批、问题升级等示例流程
-- 🎨 **Gradio UI**：纯 Python 构建的现代化 Web 界面
+- 🎨 **Streamlit UI**：现代化 Web 界面，对话页支持 SSE 流式输出
 - 🔌 **多 LLM 支持**：OpenAI 兼容 API / Ollama 本地部署 / 测试模式
 
 ---
@@ -76,23 +77,28 @@ LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8001
 ### 3. 启动服务
 
 ```bash
-# 开发模式
-uvicorn app.main:app --reload --port 8001
-
-# 生产模式（前台）
-uvicorn app.main:app --host 0.0.0.0 --port 8001
-
-# 生产模式（后台运行，日志写入 /tmp/rag.log）— 完整步骤见「生产部署」一节
-nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 > /tmp/rag.log 2>&1 &
+# 开发模式：后端 + 前端
+bash start.sh
 ```
+
+> `start.sh` 会同时启动：
+> - FastAPI 后端（端口 8001）
+> - Streamlit 前端（端口 8002）
+>
+> 按 `Ctrl+C` 同时停止两个进程。
 
 ### 4. 访问应用
 
 | 地址 | 用途 |
 |------|------|
-| http://localhost:8001/ui | **Gradio Web 界面**（主入口） |
+| http://localhost:8002 | **Streamlit Web 界面**（主入口） |
 | http://localhost:8001/docs | **API 文档**（Swagger UI） |
 | http://localhost:8001/redoc | API 文档（ReDoc） |
+
+> 也可以单独启动后端：
+> ```bash
+> uvicorn app.main:app --reload --port 8001
+> ```
 
 ---
 
@@ -220,12 +226,22 @@ curl -X POST http://localhost:8001/api/conversations/<conv-id>/query \
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-### 2. 后台运行（简单起步）
+### 2. 启动服务（后台运行）
 
-在服务器项目根目录，用 `nohup` 让服务在后台运行，日志写入文件：
+**方式一：使用 start.sh（推荐）**
+```bash
+bash start.sh
+```
+内部使用 `nohup` 同时启动后端和前端，日志写入 `/tmp/rag.log`。
+
+**方式二：分别启动**
 
 ```bash
+# 后端
 nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 > /tmp/rag.log 2>&1 &
+
+# 前端
+nohup .venv/bin/streamlit run app/streamlit_app/app.py --server.port 8002 --server.headless true > /tmp/streamlit.log 2>&1 &
 
 # 验证
 curl http://localhost:8001/api/health
@@ -234,7 +250,8 @@ curl http://localhost:8001/api/health
 # 看日志
 tail -f /tmp/rag.log
 # 停止（用 pgrep 查到的 PID）
-pgrep -af uvicorn   # 记下第一列的 PID
+pgrep -af uvicorn
+pgrep -af streamlit
 kill <PID>
 ```
 
@@ -255,7 +272,7 @@ DATABASE_URL=postgresql://user:password@host:5432/rag_db
 alembic upgrade head
 ```
 
-### 4. 使用 Nginx 反向代理
+### 5. 使用 Nginx 反向代理
 
 ```nginx
 server {
@@ -273,11 +290,13 @@ server {
 }
 ```
 
-### 5. 使用 systemd 管理服务
+### 4. 使用 systemd 管理服务
+
+**后端服务** `/etc/systemd/system/rag-backend.service`：
 
 ```ini
 [Unit]
-Description=Enterprise RAG System
+Description=RAG System Backend
 After=network.target
 
 [Service]
@@ -288,6 +307,26 @@ ExecStart=/opt/zz-demand-system/.venv/bin/uvicorn app.main:app --host 127.0.0.1 
 Restart=always
 RestartSec=5
 Environment=APP_DEBUG=false
+
+[Install]
+WantedBy=multi-user.target
+```
+
+**前端服务** `/etc/systemd/system/rag-frontend.service`：
+
+```ini
+[Unit]
+Description=RAG System Frontend (Streamlit)
+After=network.target
+Requires=rag-backend.service
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/zz-demand-system
+ExecStart=/opt/zz-demand-system/.venv/bin/streamlit run app/streamlit_app/app.py --server.port 8002 --server.headless true
+Restart=always
+RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
@@ -319,16 +358,16 @@ python test_e2e.py
 
 ```
 app/
-├── api/           # FastAPI 路由层
-├── models/        # SQLAlchemy ORM 模型
-├── schemas/       # Pydantic 请求/响应模型
-├── services/      # 业务逻辑层
-├── rag/           # RAG 核心（嵌入/分块/向量库/管线/链）
-├── workflows/     # 业务流程引擎
-└── ui/            # Gradio 前端
+├── api/             # FastAPI 路由层
+├── models/          # SQLAlchemy ORM 模型
+├── schemas/         # Pydantic 请求/响应模型
+├── services/        # 业务逻辑层
+├── rag/             # RAG 核心（嵌入/分块/向量库/管线/链）
+├── workflows/       # 业务流程引擎
+└── streamlit_app/   # Streamlit 前端
 
-docs/              # 详细架构文档
-├── architecture.md # 技术方案文档
+docs/               # 详细架构文档
+├── architecture.md  # 技术方案文档
 ```
 
 详细架构设计见 [docs/architecture.md](docs/architecture.md)。
@@ -340,7 +379,7 @@ docs/              # 详细架构文档
 | 类别 | 技术 |
 |------|------|
 | **Web 框架** | FastAPI 0.115+ |
-| **UI 框架** | Gradio 5.x |
+| **UI 框架** | Streamlit 1.40+ |
 | **ORM** | SQLAlchemy 2.0+ |
 | **数据库迁移** | Alembic |
 | **向量数据库** | Chroma |
@@ -353,7 +392,7 @@ docs/              # 详细架构文档
 
 ## 📈 未来规划
 
-- [ ] 流式输出（SSE）：提升 RAG 回答的用户体验
+- [x] 流式输出（SSE）：提升 RAG 回答的用户体验（已基于 Streamlit 实现）
 - [ ] OpenAPI 兼容第 3 方供应商（DeepSeek、通义千问、智谱等）预置配置
 - [ ] LangGraph 工作流引擎：支持复杂 DAG 流程编排
 - [ ] 批量文档导入（文件夹上传）

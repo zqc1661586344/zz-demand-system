@@ -1,8 +1,8 @@
 # 企业级 RAG 系统 — 技术方案文档
 
-> **版本**: 0.1.0  
-> **最后更新**: 2026-08-14  
-> **项目状态**: Phase 1–4 核心功能已完成，E2E 验证通过
+> **版本**: 0.2.0  
+> **最后更新**: 2026-08-22  
+> **项目状态**: 核心功能已完成，E2E 验证通过
 
 ---
 
@@ -17,7 +17,7 @@
 7. [认证流程](#7-认证流程)
 8. [文档处理管线](#8-文档处理管线)
 9. [RAG 问答流程](#9-rag-问答流程)
-10. [Gradio 前端设计](#10-gradio-前端设计)
+10. [Streamlit 前端设计](#10-streamlit-前端设计)
 11. [业务流程引擎](#11-业务流程引擎)
 12. [迁移路径](#12-迁移路径)
 13. [部署与运维](#13-部署与运维)
@@ -53,7 +53,7 @@
 | 决策项 | 选型 | 理由 |
 |--------|------|------|
 | **Web 框架** | FastAPI 0.115+ | 高性能异步支持、自动 OpenAPI 文档、依赖注入体系 |
-| **前端框架** | Gradio 5.x | 纯 Python 快速构建 UI，后端开发者零前端成本 |
+| **前端框架** | Streamlit 1.40+ | 纯 Python 快速构建 UI，SSE 流式输出原生支持，页面路径由 query params 管理 |
 | **ORM** | SQLAlchemy 2.0+ | 成熟稳定、支持异步、迁移友好 |
 | **数据库迁移** | Alembic 1.13+ | 与 SQLAlchemy 原生集成 |
 | **数据库（开发）** | SQLite | 零配置，适合开发阶段 |
@@ -75,46 +75,55 @@
 
 ```
 ┌───────────────────────────────────────────────────────────┐
-│  uvicorn (单进程, 端口 8000)                               │
+│  进程 1: FastAPI (端口 8001)                               │
 │                                                           │
 │  ┌────────────────────────────────────────────────────┐   │
-│  │  Gradio UI (mount 到 FastAPI, 路径 /ui)             │   │
-│  │  ┌──────────┐ ┌──────────┐ ┌────────┐ ┌────────┐  │   │
-│  │  │ 问答页   │ │ 文档页 │ │ 流程页 │ │ 管理页  │  │   │
-│  │  └────┬─────┘ └────┬─────┘ └───┬────┘ └───┬────┘  │   │
-│  │       └──────────┬──┴───────────┴───────────┘       │   │
-│  │                  │ api_client.py                     │   │
-│  │                  │ (httpx + JWT)                     │   │
-│  └──────────────────┼──────────────────────────────────┘   │
-│                     │ HTTP 内部调用 (localhost:8000)        │
-│  ┌──────────────────┼──────────────────────────────────┐   │
-│  │  FastAPI 路由层   │                                  │   │
-│  │  ┌───────────────┴──────────────┐                   │   │
-│  │  │ JWT 中间件 (验证所有请求)      │                   │   │
-│  │  └───────────────┬──────────────┘                   │   │
-│  │  ┌───────────────┴──────────────┐                   │   │
-│  │  │ 路由: /api/auth/*            │                   │   │
-│  │  │       /api/documents/* │                   │   │
-│  │  │       /api/conversations/* │                   │   │
-│  │  │       /api/documents/*       │                   │   │
-│  │  │       /api/conversations/*   │                   │   │
-│  │  └───────────────┬──────────────┘                   │   │
-│  │  ┌───────────────┴──────────────┐                   │   │
-│  │  │  服务层 (services/*)          │                   │   │
-│  │  └───┬──────┬───────┬──────────┘                   │   │
-│  └──────┼──────┼───────┼──────────────────────────────┘   │
-│         │      │       │                                   │
-│  ┌──────┴┐ ┌───┴───┐ ┌┴───────────┐                      │
-│  │ RAG   │ │Workfl │ │ SQLAlchemy │                      │
-│  │ Engine│ │Engine │ │ + Chroma   │                      │
-│  └───────┘ └───────┘ └────────────┘                      │
+│  │  FastAPI 路由层                                    │   │
+│  │  ┌─────────────────────────────────────────────┐   │   │
+│  │  │ JWT 中间件 (Bearer token 验证)               │   │   │
+│  │  └──────────┬──────────────────────────────────┘   │   │
+│  │  ┌──────────┴──────────────────────────────────┐   │   │
+│  │  │ 路由: /api/auth/* /api/documents/*          │   │   │
+│  │  │       /api/conversations/* /api/workflows/*  │   │   │
+│  │  └──────────┬──────────────────────────────────┘   │   │
+│  │  ┌──────────┴──────────────────────────────────┐   │   │
+│  │  │  服务层 (services/*) + RAG Engine + Chroma   │   │   │
+│  │  │  + SQLAlchemy + Workflow Engine              │   │   │
+│  │  └─────────────────────────────────────────────┘   │   │
+│  └────────────────────────────────────────────────────┘   │
+│                                                           │
+│  ┌────────────────────────────────────────────────────┐   │
+│  │  持久化存储: data/app.db (SQLite),                  │   │
+│  │  data/chroma/ (Chroma), data/uploads/ (文件)       │   │
+│  └────────────────────────────────────────────────────┘   │
+└───────────────────────────────────────────────────────────┘
+         │ HTTP (localhost:8001)
+         ▼
+┌───────────────────────────────────────────────────────────┐
+│  进程 2: Streamlit (端口 8002)                             │
+│                                                           │
+│  ┌────────────────────────────────────────────────────┐   │
+│  │  app/streamlit_app/                                │   │
+│  │  ┌─────────────┐  ┌─────────────────────────────┐  │   │
+│  │  │  sidebar     │  │  主内容区域                  │  │   │
+│  │  │  nav radio   │  │  ┌──────────────────────┐  │  │   │
+│  │  │  + 页面按钮    │  │  │ 对话页 (chat)        │  │  │   │
+│  │  └─────────────┘  │  │  SSE 流式输出           │  │  │   │
+│  │                    │  │  + 来源文档展示         │  │  │   │
+│  │  api_client.py ────┤  ├──────────────────────┤  │  │   │
+│  │  (httpx 同步调用   │  │ 文档管理页 (documents) │  │  │   │
+│  │   后端 API)       │  │ 上传/列表/勾选批量删除 │  │  │   │
+│  │                    │  └──────────────────────┘  │  │   │
+│  │  auth.py           │                             │  │   │
+│  │  (自动登录 admin)  │                             │  │   │
+│  └────────────────────────────────────────────────────┘   │
 └───────────────────────────────────────────────────────────┘
 ```
 
 ### 3.2 架构原则
 
 1. **分层架构**：API 路由层 → 服务层 → 数据访问层（ORM/RAG），层间通过依赖注入解耦
-2. **同进程部署**：Gradio 作为子应用挂载在 FastAPI 中（`app.mount("/ui", gr_app)`），避免跨进程通信开销
+2. **前后端分离**：FastAPI 后端（端口 8001）与 Streamlit 前端（端口 8002）各为独立进程，通过 HTTP/httpx 通信
 3. **配置驱动**：所有环境敏感参数通过 `.env` + `pydantic-settings` 管理，支持 `test` 模式用于测试
 4. **异步处理**：文档解析和向量化使用 `BackgroundTasks` 异步执行，不阻塞 API 响应
 5. **测试友好**：内置 `FakeEmbeddings` 和 `FakeLLM`（RunnableLambda），支持无外部依赖的 E2E 测试
@@ -123,9 +132,9 @@
 
 | 决策 | 说明 |
 |------|------|
-| Gradio 挂载方式 | Gradio 作为 FastAPI 子应用同进程部署，通过 httpx 内部调用自身 API |
+| Streamlit 独立进程 | Streamlit 作为独立进程运行（端口 8002），通过 httpx 调用后端 API（端口 8001）|
 | Chroma 持久化 | 统一使用一个 Chroma collection（`documents`），所有文档共享检索 |
-| Token 管理 | Gradio 前端用 `gr.State()` 存储 JWT，支持自动刷新 |
+| 页面状态管理 | Streamlit `st.query_params` 持久化当前页面，`st.session_state` 管理对话和文档列表 |
 | 测试模式 | `LLM_PROVIDER=test` 和 `EMBEDDING_PROVIDER=test` 启用 Mock 实现 |
 
 ---
@@ -145,7 +154,7 @@ zz-demand-system/
 │
 ├── app/                        # 应用核心代码
 │   ├── __init__.py
-│   ├── main.py                 # FastAPI 入口 + Gradio 挂载
+│   ├── main.py                 # FastAPI 入口
 │   ├── config.py               # pydantic-settings 配置类
 │   ├── database.py             # SQLAlchemy 引擎、会话、种子数据
 │   ├── dependencies.py         # FastAPI 依赖注入（当前用户、角色检查）
@@ -174,7 +183,6 @@ zz-demand-system/
 │   ├── services/               # 业务逻辑层
 │   │   ├── auth_service.py     # JWT 签发/验证、密码哈希
 │   │   ├── user_service.py     # 用户 CRUD
-│   │   ├── knowledge_base_service.py   # [已移除]
 │   │   ├── document_service.py
 │   │   ├── conversation_service.py
 │   │   └── workflow_service.py
@@ -193,19 +201,13 @@ zz-demand-system/
 │   │       ├── doc_review.py   # 文档审批流程
 │   │       └── qa_escalation.py # 问题升级流程
 │   │
-│   └── ui/                     # Gradio 前端
-│       ├── app.py              # Gradio 应用入口
-│       ├── api_client.py       # 封装 HTTP 调用
-│       ├── auth_helpers.py     # JWT 状态管理
-│       ├── components/         # 公共组件
-│       │   └── layout.py       # 侧边栏/导航布局
-│       └── pages/              # 页面模块
-│           ├── login.py        # 登录/注册页
-│           ├── chat.py         # RAG 问答页
-│           ├── knowledge_bases.py   # [已移除]
-│           ├── documents.py
-│           ├── admin.py        # 用户管理（管理员）
-│           └── workflows.py    # 业务流程页
+│   └── streamlit_app/          # Streamlit 前端
+│       ├── app.py              # 主入口（sys.path + 页面路由 + 侧边栏导航）
+│       ├── api_client.py       # 封装 HTTP 调用（httpx + JWT 自动刷新）
+│       ├── auth.py             # 自动登录（admin/admin123）
+│       └── views/              # 页面模块
+│           ├── chat.py         # RAG 问答页（SSE 流式输出 + 来源文档展示）
+│           └── documents.py    # 文档管理页（上传/列表/勾选批量删除）
 │
 ├── alembic/                    # 数据库迁移
 │   ├── env.py
@@ -434,12 +436,13 @@ documents ──── document_chunks（元数据记录）
 
 ```
 ┌─────────────┐         ┌─────────────┐         ┌──────────┐
-│  Gradio UI  │         │   FastAPI   │         │ SQLite   │
+│ Streamlit   │         │   FastAPI   │         │ SQLite   │
+│  UI         │         │  (8001)     │         │          │
 └──────┬──────┘         └──────┬──────┘         └────┬─────┘
        │                       │                      │
        │  POST /api/auth/login │                      │
        │  {username, password} │                      │
-       ├──────────────────────►│  查询用户 + 验证密码    │
+       ├──────────────────────►│  查询用户 + 验证密码   │
        │                       ├─────────────────────►│
        │                       │◄─────────────────────┤
        │  {access_token,       │                      │
@@ -447,7 +450,7 @@ documents ──── document_chunks（元数据记录）
        │   user}               │                      │
        │◄──────────────────────┤                      │
        │                       │                      │
-       │  令牌存入 gr.State()   │                      │
+       │  令牌存入 session_state                       │
        │                       │                      │
        │  POST /api/documents/upload                  │
        │  Authorization: Bearer <token>                │
@@ -464,9 +467,9 @@ documents ──── document_chunks（元数据记录）
 
 - **Access Token**：有效期 30 分钟（可配置），用于 API 请求认证
 - **Refresh Token**：有效期 7 天（可配置），用于自动刷新 Access Token
-- **Gradio 端**：`gr.State()` 存储 `access_token`、`refresh_token`、`user_info`
-- **自动刷新**：检测 401 响应时自动用 Refresh Token 换取新 Token 对
-- **退出登录**：清空 `gr.State()`，浏览器关闭也丢失状态
+- **Streamlit 端**：`st.session_state` 存储 `access_token`、`refresh_token`、`user_info`
+- **自动刷新**：`api_client.py` 检测 401 响应时自动用 Refresh Token 换取新 Token 对
+- **退出登录**：清空 `st.session_state`，刷新页面后重新自动登录
 
 ### 7.3 密码安全
 
@@ -550,14 +553,14 @@ documents ──── document_chunks（元数据记录）
 
 ```
 ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌──────────┐
-│  用户    │   │ Gradio   │   │ FastAPI  │   │ Chroma   │   │  LLM     │
+│  用户    │   │ Streamlit│   │ FastAPI  │   │ Chroma   │   │  LLM     │
 │  浏览器  │   │   UI     │   │ 服务端   │   │ 向量库   │   │ (OpenAI/ │
 └────┬─────┘   └────┬─────┘   └────┬─────┘   └────┬─────┘   │ Ollama)  │
      │              │              │              │         └────┬─────┘
      │  输入问题     │              │              │              │
      ├─────────────►│              │              │              │
      │              │ POST /query  │              │              │
-     │              │ {query}      │              │              │
+     │              │ (SSE stream) │              │              │
      │              ├────────────►│              │              │
      │              │              │ embed(问题)   │              │
      │              │              ├─────────────►│              │
@@ -569,14 +572,14 @@ documents ──── document_chunks（元数据记录）
      │              │              │  构建 Prompt  │              │
      │              │              │  (context+Q) │              │
      │              │              ├──────────────┼────────────►│
-     │              │              │  LLM 生成回答  │             │
+     │              │              │  LLM 流式生成  │             │
      │              │              │◄──────────────┼─────────────┤
      │              │              │              │              │
-     │              │  返回结果    │              │              │
-     │              │  {answer,   │              │              │
-     │              │   sources,  │              │              │
-     │              │   chunks}   │              │              │
+     │              │ SSE events:  │              │              │
+     │              │ token 逐字     │              │              │
+     │              │ sources+done │              │              │
      │              │◄────────────┤              │              │
+     │  逐 token    │              │              │              │
      │  展示答案    │              │              │              │
      │  + 来源     │              │              │              │
      │◄─────────────┤              │              │              │
@@ -628,56 +631,89 @@ StrOutputParser()
 
 ---
 
-## 10. Gradio 前端设计
+## 10. Streamlit 前端设计
 
 ### 10.1 页面布局
 
 ```
 ┌───────────────────────────────────────────────────┐
-│  [Logo]  企业 RAG 文档问答系统                        │
-│  ────────────────────────────────────────────────  │
-│  [👤 用户名]  [角色标签]  [退出]                    │
-├───────────┬───────────────────────────────────────┤
-│           │                                       │
-│  📄 导航   │   主内容区域                            │
-│           │                                       │
-│  💬 问答   │   （根据选中菜单切换）                   │
-│           │                                       │
-│  📁 文档   │                                       │
-│           │                                       │
-│  🔄 流程   │                                       │
-│           │                                       │
-│  ⚙ 管理   │                                       │
-│  （admin） │                                       │
-│           │                                       │
-└───────────┴───────────────────────────────────────┘
+│  📁 文档管理                                         │
+│  💬 对话                                            │
+│                                                   │
+│  ───────────────────────────────────────────────  │
+│                                                   │
+│  👤 admin [admin]                                  │
+│                                                   │
+│                         主内容区域                    │
+│                         （根据侧边栏选中菜单切换）    │
+│                                                   │
+│                         对话页: SSE 流式输出         │
+│                         来源文档展示                 │
+│                                                   │
+│                         文档页: 上传                  │
+│                         列表 + 勾选批量删除           │
+└───────────────────────────────────────────────────┘
 ```
+
+布局特点：
+- **侧边栏 `st.radio`**：提供"对话"和"文档管理"两个导航页
+- **页面持久化**：当前页面通过 `st.query_params["page"]` 存储，刷新后自动恢复
+- **对话状态**：当前 `conv_id` 和消息列表保存在 `st.session_state` 中
 
 ### 10.2 页面功能
 
 | 页面 | 功能 | 访问权限 |
 |------|------|---------|
-| **问答页** | 发起 RAG 对话、查看带来源的回答、对话历史管理 | 已登录用户 |
-| **文档页** | 上传文档、查看处理状态、删除文档、重新处理 | 编辑者可上传/删除 |
-| **流程页** | 查看工作流定义、创建并执行实例、查看步骤状态 | 已登录用户 |
-| **管理页** | 用户列表、编辑用户、分配角色、删除用户 | admin 角色 |
+| **对话页** | RAG 问答（SSE 流式输出）、来源文档展示、对话历史切换、新对话 | 已登录用户 |
+| **文档管理页** | 上传文档→点击"上传"确认、列表查看状态、单条删除、勾选批量删除 | 所有用户 |
 
 ### 10.3 认证状态管理
 
 ```python
-# auth_helpers.py
-class AuthState:
-    access_token: str
-    refresh_token: str
-    username: str
-    roles: list[str]
-    is_authenticated: bool
-    is_admin: bool
+# auth.py — auto_login() 在 app 启动时自动执行
+def auto_login():
+    """POST /api/auth/login admin/admin123，令牌存入 st.session_state。"""
 ```
 
-- 状态以 JSON 字符串形式存储在 `gr.State()` 中
-- `api_client.py` 封装所有 API 调用，自动注入 `Authorization` 头
-- 401 响应时自动尝试 Refresh Token，刷新失败跳转登录页
+- `access_token`、`refresh_token`、`user_info` 存储在 `st.session_state` 中
+- `api_client.py` 的模块级函数（`get()`/`post()`/`delete()` 等）自动注入 `Authorization` 头
+- 401 响应时自动用 Refresh Token 换取新 Token 对，刷新失败则重新登录
+
+### 10.4 SSE 流式输出实现
+
+```
+Streamlit                      FastAPI
+   │                              │
+   │  POST /conversations/{id}/query/stream
+   │  Authorization: Bearer xxx   │
+   │  {"query": "问题", top_k: 5} │
+   ├─────────────────────────────►│
+   │                              │
+   │  ← SSE: data: {"token": "答"}  │
+   │  ← SSE: data: {"token": "案"}  │
+   │  ← SSE: data: {"token": "。"}  │
+   │  ← SSE: data: {"sources": [...], "done": true}
+   │  ← SSE: data: [DONE]        │
+   │                              │
+   │  逐 token 追加到 st.markdown │
+   │  最后渲染来源文档             │
+```
+
+- `views/chat.py` 使用 `httpx` 同步流式读取，`resp.aiter_lines()` 逐行解析 `data: ` 事件
+- 每收到一个 `{"token": "..."}` 事件即追加到 session_state 中的当前回答文本
+- `{"sources": [...], "done": true}` 事件触发来源文档展示
+- 消息最终异步入库（FastAPI `BackgroundTasks`）
+
+### 10.5 关键设计决策
+
+| 决策 | 说明 |
+|------|------|
+| st.query_params 持久化页面 | 侧边栏 `st.radio` 选中项写入 `st.query_params["page"]`，`app.py` 据此路由；刷新后 radio 从 query_params 重建 |
+| 文件上传"确认"模式 | `st.file_uploader` + `st.button("上传")` 组合，选文件后必须点击上传按钮才触发 |
+| 勾选批量删除 | `st.session_state["selected_docs"]` 集合追踪选中项，批量删除按钮放在表格下方确保读取到最新值 |
+| counter 重置 widget | 上传完成后递增 `_upload_key` 强制新建 file_uploader widget，避免残留文件值 |
+| SSE 流式展示 | sync httpx `stream()` 方法逐行读取，`st.markdown` 增量更新 |
+| 来源文档展示 | `_load_messages` 解析消息的 `sources` JSON 字段，在助理回答下方渲染 📎 来源文档列表 |
 
 ---
 
@@ -740,10 +776,11 @@ engine = create_engine("postgresql://user:pass@host:5432/rag_db")
 3. 运行 `alembic upgrade head` 创建表结构
 4. 注意：SQLite 不支持 `ALTER` 等操作，迁移前需确认 Schema 一致性
 
-### 12.2 Gradio → Vue/React（前端重写）
+### 12.2 Streamlit → Vue/React（前端重写）
 
 - API 接口层完全不变，前端只需复用 REST API
 - JWT 认证机制不变，新前端适配 token 存储策略即可
+- SSE 流式协议（`text/event-stream`，`data: {"token": "..."}` 格式）框架无关，任何前端均可消费
 - 后端代码零改动，API 接口是契约边界
 
 ### 12.3 简单流程 → LangGraph（复杂编排）
@@ -771,19 +808,23 @@ uv sync
 cp .env.example .env
 # 编辑 .env 填入 LLM API Key
 
-# 3. 启动服务（开发模式）
-uvicorn app.main:app --reload --port 8000
+# 3. 启动服务（开发模式，一键启动后端+前端）
+bash start.sh
 
 # 4. 访问
-# API 文档: http://localhost:8000/docs
-# Gradio UI: http://localhost:8000/ui
+# Streamlit UI: http://localhost:8002
+# API 文档:    http://localhost:8001/docs
 ```
 
 ### 13.2 测试模式启动
 
 ```bash
 # 使用内置 Mock 模型，无需外部 API
-LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8000
+# 后端单独启动
+LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8001
+
+# 前端（另一个终端）
+streamlit run app/streamlit_app/app.py --server.port 8002 --server.headless true
 ```
 
 ### 13.3 生产部署建议
@@ -837,7 +878,7 @@ Chroma 数据存储在 `data/chroma/` 目录，直接复制该目录即可迁移
 | python-jose | ≥3.3.0 | JWT |
 | bcrypt | ≥5.0.0 | 密码哈希 |
 | python-multipart | ≥0.0.12 | 文件上传 |
-| gradio | ≥5.0, <6.0 | UI 框架 |
+| streamlit | ≥1.40.0 | UI 框架 |
 | httpx | ≥0.27.0 | HTTP 客户端 |
 | langchain | ≥1.3.0, <2.0.0 | RAG 框架 |
 | langchain-community | ≥0.4.0 | 文档加载器 |
@@ -862,7 +903,7 @@ Chroma 数据存储在 `data/chroma/` 目录，直接复制该目录即可迁移
 
 | 阶段 | 验证方法 | 预期结果 |
 |------|---------|---------|
-| 基础设施 | `uvicorn app.main:app` | http://localhost:8000/docs 显示 Swagger |
+| 基础设施 | `bash start.sh` | http://localhost:8002 显示 Streamlit UI；http://localhost:8001/docs 显示 Swagger |
 | 认证系统 | 注册 → 登录 → /me | 收到 JWT，返回用户信息含角色 |
 | RAG 管线 | 上传文档 → 轮询 → 状态 indexed | 文档状态变为 indexed，chunk_count > 0 |
 | RAG 问答 | 对话中发送 query | 收到带来源引用的回答 |
