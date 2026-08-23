@@ -179,14 +179,16 @@ def query_rag(
     docs = _retrieve_relevant_docs(query, top_k)
 
     if not docs:
-        # 检索为空或相关性不足 → 不走 RAG，改为纯 LLM 自由聊天（基于自身知识回答，不附带来源）
-        prefix = "**当前已有文档中找不到答案，以下由大模型自身知识回答：**\n\n"
+        # 检索为空或相关性不足 → 不走 RAG，改为纯 LLM 自由聊天（基于自身知识回答，不附带来源）。
+        # 【根治】："找不到答案"提示语由前端按 free_chat 标记渲染，不进入模型输出路径，
+        # 从而不会污染存库的历史消息，避免下一轮 LLM 模仿复述该提示语导致重复。
         chain = _build_free_chat_chain()
         answer = chain.invoke({"question": query, "history": history_text})
         return {
-            "answer": prefix + answer,
+            "answer": answer,  # 纯模型回答，不含提示语
             "sources": [],
             "chunks": [],
+            "free_chat": True,
         }
 
     # Format context and sources
@@ -213,9 +215,9 @@ def query_rag_stream(
     docs = _retrieve_relevant_docs(query, top_k)
 
     if not docs:
-        prefix = "**当前已有文档中找不到答案，以下由大模型自身知识回答：**\n\n"
-        full_answer = prefix
-        yield {"type": "token", "data": prefix}
+        # 【根治】：提示语由前端按 free_chat 标记渲染，不进入模型输出路径
+        yield {"type": "free_chat", "data": True}
+        full_answer = ""
         chain = _build_free_chat_chain()
         for chunk in chain.stream({"question": query, "history": history_text}):
             full_answer += chunk

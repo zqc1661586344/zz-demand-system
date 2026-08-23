@@ -13,6 +13,9 @@ logger = logging.getLogger(__name__)
 
 TOP_K = 5
 
+# 【根治】："找不到答案"提示语由前端按 free_chat 标记渲染，不进入模型输出路径
+FREE_CHAT_PREFIX = "**当前已有文档中找不到答案，以下由大模型自身知识回答：**\n\n"
+
 
 def _ensure_conversation() -> str:
     """Get or create the current conversation ID from session state."""
@@ -46,6 +49,9 @@ def _load_messages(conv_id: str):
                         entry["sources"] = sources_list
                 except (json.JSONDecodeError, TypeError):
                     pass
+            # 自由聊天标记持久化在数据库，前端据此渲染提示语
+            if m.get("free_chat"):
+                entry["free_chat"] = True
             conv_messages.append(entry)
         st.session_state["conv_messages"] = conv_messages
     except ApiError as e:
@@ -57,7 +63,11 @@ def _display_messages():
     """Render all messages from session state into Streamlit chat UI."""
     for m in st.session_state["conv_messages"]:
         with st.chat_message(m["role"]):
-            st.markdown(m["content"])
+            # 自由聊天消息：前端补上提示语（纯模型回答存库，不含提示语）
+            content = m["content"]
+            if m.get("free_chat"):
+                content = FREE_CHAT_PREFIX + content
+            st.markdown(content)
             # Show sources for assistant messages
             sources = m.get("sources")
             if sources:
@@ -105,6 +115,7 @@ def page():
         placeholder = st.empty()
         full_answer = ""
         sources = []
+        free_chat = False  # 由后端 free_chat 事件置位，前端据此渲染提示语
 
         access_token = st.session_state.get("access_token")
 
@@ -139,9 +150,13 @@ def page():
                             st.error(f"生成失败：{data['error']}")
                             return
 
+                        if data.get("free_chat"):
+                            free_chat = True
+
                         if "token" in data:
                             full_answer += data["token"]
-                            placeholder.markdown(full_answer + "▌")
+                            display = FREE_CHAT_PREFIX + full_answer if free_chat else full_answer
+                            placeholder.markdown(display + "▌")
 
                         if "sources" in data:
                             sources = data.get("sources", [])
@@ -153,8 +168,9 @@ def page():
             st.error(f"网络错误：{e}")
             return
 
-        # Final render without cursor
-        placeholder.markdown(full_answer)
+        # Final render — 自由聊天时由前端渲染提示语，纯模型回答仍存库
+        display = FREE_CHAT_PREFIX + full_answer if free_chat else full_answer
+        placeholder.markdown(display)
 
         # Show sources
         if sources:
@@ -166,7 +182,7 @@ def page():
             st.markdown("---\n**📎 来源文档**\n" + source_lines)
 
     # Save messages to state for next render (including sources)
-    entry = {"role": "assistant", "content": full_answer}
+    entry = {"role": "assistant", "content": full_answer, "free_chat": free_chat}
     if sources:
         entry["sources"] = sources
     st.session_state["conv_messages"].append(entry)

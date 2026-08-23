@@ -53,7 +53,7 @@ def get_bm25_retriever():
 def refresh_bm25_index_from_chroma() -> None:
     """重新读取Chroma中的所有数据块，并重建BM25索引。"""
     _refresh_bm25_from_chroma()
-    n = _bm25_retriever.docs  # list[str] stored inside BM25Retriever
+    n = _bm25_retriever.docs if _bm25_retriever else None
     logger.info("BM25 index refreshed from Chroma (%d chunks)", len(n) if n else 0)
 
 
@@ -70,8 +70,8 @@ def _refresh_bm25_from_chroma() -> None:
         metadatas = data.get("metadatas", []) or []
 
         if not texts:
-            logger.info("Chroma is empty — creating empty BM25 index")
-            _bm25_retriever = BM25Retriever.from_texts([])
+            logger.info("Chroma 为空 — BM25 索引置为 None")
+            _bm25_retriever = None
             return
 
         _bm25_retriever = BM25Retriever.from_texts(
@@ -82,8 +82,8 @@ def _refresh_bm25_from_chroma() -> None:
         )
         logger.info("BM25 index built from %d chunks", len(texts))
     except Exception as exc:
-        logger.warning("BM25 index refresh failed (Chroma may be empty): %s", exc)
-        _bm25_retriever = BM25Retriever.from_texts([])
+        logger.warning("BM25 index refresh failed: %s", exc)
+        _bm25_retriever = None
 
 
 # ---------------------------------------------------------------------------
@@ -113,6 +113,9 @@ def hybrid_search(query: str, top_k: int = 5) -> list[Document]:
 
     # 2. Sparse retriever (BM25)
     sparse = get_bm25_retriever()
+    if sparse is None:
+        # Chroma 为空（例如所有文档被删除后）→ 无 BM25 可融合，回退到纯稠密检索
+        return dense_retriever.invoke(query)[:top_k]
     sparse.k = top_k
 
     # 3. Ensemble with weighted RRF

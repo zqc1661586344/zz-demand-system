@@ -66,6 +66,7 @@ def add_message(
     role: str,
     content: str,
     sources: list[dict] | None = None,
+    free_chat: bool = False,
 ) -> Message:
     msg = Message(
         id=str(uuid.uuid4()),
@@ -73,6 +74,7 @@ def add_message(
         role=role,
         content=content,
         sources=json.dumps(sources, ensure_ascii=False) if sources else None,
+        free_chat=1 if free_chat else 0,
     )
     db.add(msg)
 

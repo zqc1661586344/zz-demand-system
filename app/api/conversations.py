@@ -29,8 +29,8 @@ from app.services.conversation_service import (
 )
 
 # How many assistant+user message pairs = 1 round to keep in recent window
-RECENT_ROUNDS = 5
-SUMMARY_INTERVAL = RECENT_ROUNDS * 2  # 10 messages = every 5 rounds
+RECENT_ROUNDS = 20
+SUMMARY_INTERVAL = RECENT_ROUNDS * 2  # 40 messages = every 20 rounds
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -170,31 +170,37 @@ def query_conversation(
     history, summary, total = _build_history(conv, db, conv_id)
 
     # Always run RAG against the single document collection
+    free_chat = False
     try:
         result = query_rag(query=req.query, top_k=req.top_k, history=history, summary=summary)
         answer = result["answer"]
         sources = result["sources"]
+        free_chat = bool(result.get("free_chat", False))
     except Exception as e:
         answer = f"RAG query failed: {str(e)}"
         sources = []
 
     # Save user message
     add_message(db, conv_id, role="user", content=req.query)
-    # Save assistant message
+    # 【根治】：存库的是纯模型回答（前端已按 free_chat 渲染提示语），历史不含提示语
     add_message(db, conv_id, role="assistant", content=answer, sources=sources)
 
     # Trigger summary regeneration every SUMMARY_INTERVAL messages
     _maybe_summarize(db, conv_id, total)
 
-    return QueryResponse(answer=answer, sources=sources)
+    return QueryResponse(answer=answer, sources=sources, free_chat=free_chat)
 
 
-def _save_messages_background(conv_id: str, query: str, answer: str, sources: list):
-    """后台任务：流处理完成后，使用自己的数据库会话保存消息。"""
+def _save_messages_background(conv_id: str, answer: str, sources: list, free_chat: bool = False):
+    """后台任务：流处理完成后，使用自己的数据库会话保存助手消息。
+
+    注意：用户消息已在 `event_stream` 生成流之前【同步】写入数据库，
+    以确保下一轮追问的 `_build_history` 一定能读到上一轮的用户问题（避免竞态导致"无记忆"）。
+    这里后台只负责保存助手回答。
+    """
     db = SessionLocal()
     try:
-        add_message(db, conv_id, role="user", content=query)
-        add_message(db, conv_id, role="assistant", content=answer, sources=sources)
+        add_message(db, conv_id, role="assistant", content=answer, sources=sources, free_chat=free_chat)
         db.commit()
     except Exception as e:
         logger = logging.getLogger(__name__)
@@ -224,21 +230,29 @@ def query_conversation_stream(
     history, summary, total = _build_history(conv, db, conv_id)
 
     def event_stream():
+        free_chat = False
+        # 同步保存用户消息（保证下一轮 _build_history 一定能读到）
+        # 避免 BackgroundTasks 与后续请求的竞态导致"无记忆"
+        add_message(db, conv_id, role="user", content=req.query)
+        db.commit()
         try:
             for event in query_rag_stream(
                 query=req.query, top_k=req.top_k, history=history, summary=summary
             ):
                 if event["type"] == "token":
                     yield f"data: {json.dumps({'token': event['data']})}\n\n"
+                elif event["type"] == "free_chat":
+                    free_chat = True
+                    yield f"data: {json.dumps({'free_chat': True})}\n\n"
                 elif event["type"] == "sources":
                     sources = event["data"]
-                    # Schedule background DB write
+                    # Schedule background DB write (仅助手回答，用户消息已同步保存)
                     background_tasks.add_task(
                         _save_messages_background,
                         conv_id,
-                        req.query,
                         event["full_answer"],
                         sources,
+                        free_chat,
                     )
                     # Also trigger summary regeneration in background
                     background_tasks.add_task(_maybe_summarize_background, conv_id, total)

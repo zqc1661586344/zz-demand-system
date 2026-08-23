@@ -54,6 +54,7 @@ class Message(Base):
     role = Column(String(50), nullable=False)  # user, assistant
     content = Column(Text, nullable=False)
     sources = Column(Text, nullable=True)  # JSON string of source documents
+    free_chat = Column(Integer, default=0)  # 1 = 自由聊天（前端据此渲染提示语）
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
 
     # Relationships

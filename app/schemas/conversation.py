@@ -26,6 +26,7 @@ class MessageResponse(BaseModel):
     role: str
     content: str
     sources: str | None = None
+    free_chat: bool = False
     created_at: datetime
 
     model_config = {"from_attributes": True}
@@ -39,3 +40,4 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     answer: str
     sources: list[dict] = []
+    free_chat: bool = False  # True = 本轮是自由聊天（前端据此渲染"找不到答案"提示语）
