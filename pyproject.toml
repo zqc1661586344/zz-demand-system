@@ -26,14 +26,15 @@ dependencies = [
     "docx2txt>=0.9",
     "rank-bm25>=0.2.0",
     "jieba>=0.42.1",
-    "transformers>=4.45.0",
-    "torch>=2.13.0",
 ]
 
 [project.optional-dependencies]
 postgres = ["asyncpg>=0.30.0", "psycopg2-binary>=2.9.0"]
 ollama = ["langchain-ollama>=0.2.0"]
 langgraph = ["langgraph>=0.2.0"]
+# bge-reranker 交叉编码器重排所需（默认 RAG_RERANK_ENABLED=false，不强制安装，
+# 单独装在服务器上往往因 torch/tokenizers 需本地编译而失败）
+rerank = ["transformers>=4.45.0", "torch>=2.0.0"]
 dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0", "ruff>=0.6.0", "mypy>=1.11.0"]
 
 [tool.ruff]
