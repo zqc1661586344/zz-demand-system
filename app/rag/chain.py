@@ -126,17 +126,28 @@ def _retrieve_relevant_docs(query: str, top_k: int) -> list:
 
         docs = hybrid_search(query, top_k=top_k)
         if docs:
-            # 后置过滤：hybrid 的 RRF 分数不是相似度语义，不可直接阈值过滤。
-            # 用稠密检索检查 top-1 的相关性分数——如果连最相关的文档都低于
-            # 阈值，说明 query 与文档集无关，回退到 free chat。
-            scored = similarity_search_with_relevance(query, k=1)
-            if scored and scored[0][1] < settings.rag_min_score:
-                logger.info(
-                    "Hybrid top-1 score=%.3f < min_score=%.3f → 回退自由聊天",
-                    scored[0][1],
-                    settings.rag_min_score,
-                )
-                return []
+            # 后置过滤：hybrid 的 RRF 分数不是相似度语义，不可直接阈值过滤，改用
+            # 稠密检索的真实相似度分数来判定 query 是否真的命中了文档。
+            # bge-m3 对不相关 query 也可能打出较高的绝对分数（紧凑分布），因此
+            # 用「绝对阈值 + 分数离散度」两个判据：top-1 过低，或与 top-2 的差距
+            # 太小（无区分度、呈平带），都视为未命中，回退 free chat。
+            scored = similarity_search_with_relevance(query, k=2)
+            if scored:
+                top1 = scored[0][1]
+                if len(scored) < 2:
+                    spread = 1.0
+                else:
+                    spread = top1 - scored[1][1]
+                if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
+                    logger.info(
+                        "Hybrid top-1=%.3f spread=%.3f (min_score=%.3f, min_spread=%.3f) "
+                        "→ 判定未命中，回退自由聊天",
+                        top1,
+                        spread,
+                        settings.rag_min_score,
+                        settings.rag_hybrid_min_spread,
+                    )
+                    return []
         return docs
 
     if settings.rag_search_type == "mmr":

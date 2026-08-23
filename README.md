@@ -9,7 +9,7 @@
 
 ## 📋 项目简介
 
-企业级 RAG（Retrieval-Augmented Generation）文档问答系统，支持**多用户多角色**的文档管理、**文档处理管线**（PDF/TXT/MD/DOCX → 分块 → 向量化索引）、以及基于 **RAG 的智能问答**。内置可扩展的业务流程引擎，支持未来升级到 LangGraph 复杂工作流编排。
+企业级 RAG（Retrieval-Augmented Generation）文档问答系统，支持**多用户多角色**的文档管理、**文档处理管线**（PDF/TXT/MD/DOCX → 分块 → 向量化索引 + BM25 索引）、以及三种检索模式（纯向量 / MMR 多样性 / Hybrid BM25+向量+RRF 融合）的**智能问答**。内置可扩展的业务流程引擎，支持未来升级到 LangGraph 复杂工作流编排。
 
 ### 核心功能
 
@@ -56,7 +56,7 @@ LLM_API_KEY=sk-your-api-key-here
 LLM_API_BASE=https://api.openai.com/v1
 LLM_MODEL=gpt-4o-mini
 EMBEDDING_PROVIDER=openai
-EMBEDDING_MODEL=text-embedding-3-small
+EMBEDDING_MODEL=BAAI/bge-m3
 ```
 
 **使用 Ollama 本地部署**：
@@ -65,7 +65,7 @@ LLM_PROVIDER=ollama
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen2.5:7b
 EMBEDDING_PROVIDER=ollama
-OLLAMA_EMBEDDING_MODEL=nomic-embed-text
+OLLAMA_EMBEDDING_MODEL=BAAI/bge-m3
 ```
 
 **使用测试模式（无需外部 API）**：
@@ -112,14 +112,27 @@ bash start.sh
 |------|------|--------|------|
 | `DATABASE_URL` | 否 | `sqlite:///./data/app.db` | 数据库连接（生产建议 PostgreSQL） |
 | `JWT_SECRET_KEY` | **生产必填** | `dev-secret-key-...` | JWT 签名密钥（生产环境请更换为随机字符串） |
-| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | 否 | `30` | Access Token 有效期（分钟） |
+| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | 否 | `30`（建议设 `525600`） | Access Token 有效期（分钟，长空闲场景建议 1 年） |
 | `LLM_PROVIDER` | 否 | `openai` | LLM 供应商：`openai` / `ollama` / `test` |
 | `LLM_API_KEY` | OpenAI 时必填 | — | API Key |
 | `LLM_API_BASE` | 否 | `https://api.openai.com/v1` | API 地址（支持 DeepSeek/通义千问等兼容服务） |
+| `LLM_MODEL` | 否 | `gpt-4o-mini` | LLM 模型名 |
+| `EMBEDDING_PROVIDER` | 否 | `openai` | Embedding 供应商：`openai` / `ollama` / `test` |
+| `EMBEDDING_MODEL` | 否 | `BAAI/bge-m3` | Embedding 模型（1024 维，cosine 距离） |
+| `OLLAMA_BASE_URL` | Ollama 时必填 | `http://localhost:11434` | Ollama 服务地址 |
+| `OLLAMA_MODEL` | 否 | `qwen2.5:7b` | Ollama 使用的 LLM 模型 |
+| `OLLAMA_EMBEDDING_MODEL` | 否 | `BAAI/bge-m3` | Ollama 使用的 Embedding 模型 |
 | `CHROMA_PERSIST_DIR` | 否 | `./data/chroma` | 向量数据库持久化路径 |
 | `CHUNK_SIZE` | 否 | `800` | 文本分块大小（字符数） |
 | `CHUNK_OVERLAP` | 否 | `150` | 分块重叠（字符数） |
 | `MAX_UPLOAD_SIZE_MB` | 否 | `50` | 单文件最大上传大小 |
+| `RAG_SEARCH_TYPE` | 否 | `hybrid` | 检索模式：`similarity`（纯向量）/ `mmr`（多样性）/ `hybrid`（BM25+向量+RRF 融合） |
+| `RAG_HYBRID_ALPHA` | 否 | `0.5` | Hybrid 中稠密 vs 稀疏权重（0=纯 BM25，1=纯向量） |
+| `RAG_HYBRID_MIN_SPREAD` | 否 | `0.015` | Hybrid 模式的分数离散度阈值：top1-top2 低于此值回退自由聊天 |
+| `RAG_MIN_SCORE` | 否 | `0.4` | 纯向量模式的相关性分数阈值（低于此值回退自由聊天） |
+| `RAG_RERANK_ENABLED` | 否 | `false` | 是否启用 bge-reranker 交叉编码器重排（需 transformers + torch） |
+| `RAG_RERANK_MODEL` | 否 | `BAAI/bge-reranker-v2-m3` | 重排器模型名 |
+| `RAG_RERANK_TOP_N` | 否 | `5` | 重排后保留的 top-N 结果 |
 
 完整配置项见 [`app/config.py`](app/config.py)。
 
@@ -156,6 +169,39 @@ flowchart LR
 | 纯文本 | `.txt` | `text/plain` |
 | Markdown | `.md` | `text/markdown` |
 | Word 文档 | `.docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
+
+---
+
+## 🔎 RAG 检索流程
+
+系统采用 **Hybrid RAG**：稠密向量（Chroma + bge-m3）与稀疏关键词（BM25 + jieba 中文分词）双路召回，RRF 融合排序，可选交叉编码器重排。
+
+```mermaid
+flowchart TD
+    Q[用户提问] --> H[组装对话历史<br/>最近 5 轮 + 更早摘要]
+    H --> D{检索模式<br/>RAG_SEARCH_TYPE}
+    D -->|hybrid| DH[Chroma 稠密检索<br/>bge-m3 cosine]
+    D -->|hybrid| SH[BM25 稀疏检索<br/>jieba 分词]
+    DH --> F[RRF 融合<br/>score=Σ w/(60+rank)]
+    SH --> F
+    F --> R[可选 bge-reranker 重排]
+    D -->|similarity| SV[纯向量检索<br/>分数阈值过滤 ≥0.4]
+    D -->|mmr| MM[MMR 多样性检索<br/>λ=0.7]
+    R --> G{相关性判定}
+    SV --> G
+    MM --> G
+    G -->|命中| C[format_context + RAG_PROMPT]
+    C --> L[LLM 生成]<br/>--> A[SSE 流式输出 + 来源引用]
+    G -->|未命中| FC[自由聊天<br/>纯 LLM 自身知识回答]
+    FC --> A
+```
+
+**核心设计要点**：
+- **三种检索模式**：`hybrid`（默认）/ `similarity` / `mmr`，通过 `RAG_SEARCH_TYPE` 切换。
+- **无命中回退**：hybrid 用「绝对分数 + 分数离散度」双判据；三者检索为空或判定不相关时，回退到`自由聊天`（前缀标注 *「当前已有文档中找不到答案…」*，不附带来源）。
+- **文档生命周期**：上传/删除后自动从 Chroma 全量重建 BM25 内存索引，保证关键词检索与向量索引一致。
+
+> 📄 **详细流程**：完整的多路检索结构、RRF 融合公式、重排器配置、FAQ 见 [`docs/RAG.md`](docs/RAG.md)；端到端架构见 [`docs/architecture.md`](docs/architecture.md)。
 
 ---
 
@@ -362,12 +408,13 @@ app/
 ├── models/          # SQLAlchemy ORM 模型
 ├── schemas/         # Pydantic 请求/响应模型
 ├── services/        # 业务逻辑层
-├── rag/             # RAG 核心（嵌入/分块/向量库/管线/链）
+├── rag/             # RAG 核心（嵌入/分块/向量库/管线/链/Hybrid 检索）
 ├── workflows/       # 业务流程引擎
 └── streamlit_app/   # Streamlit 前端
 
 docs/               # 详细架构文档
 ├── architecture.md  # 技术方案文档
+└── RAG.md           # RAG 检索流程详解（含 mermaid 图）
 ```
 
 详细架构设计见 [docs/architecture.md](docs/architecture.md)。
@@ -382,10 +429,12 @@ docs/               # 详细架构文档
 | **UI 框架** | Streamlit 1.40+ |
 | **ORM** | SQLAlchemy 2.0+ |
 | **数据库迁移** | Alembic |
-| **向量数据库** | Chroma |
+| **向量数据库** | Chroma（bge-m3 1024d cosine） |
 | **RAG 框架** | LangChain 1.3+ |
+| **混合检索** | rank_bm25（关键词检索）+ jieba（中文分词） |
+| **重排器** | BAAI/bge-reranker-v2-m3（可选，需 transformers + torch） |
 | **认证** | JWT（python-jose）+ bcrypt |
-| **文档解析** | PyPDF, python-docx |
+| **文档解析** | PyPDF, python-docx（docx2txt）, markdown |
 | **包管理** | uv |
 
 ---
@@ -393,7 +442,7 @@ docs/               # 详细架构文档
 ## 📈 未来规划
 
 - [x] 流式输出（SSE）：提升 RAG 回答的用户体验（已基于 Streamlit 实现）
-- [ ] OpenAPI 兼容第 3 方供应商（DeepSeek、通义千问、智谱等）预置配置
+- [x] OpenAPI 兼容第 3 方供应商（DeepSeek、通义千问、智谱等）预置配置（通过 `LLM_API_BASE` 自由切换）
 - [ ] LangGraph 工作流引擎：支持复杂 DAG 流程编排
 - [ ] 批量文档导入（文件夹上传）
 - [ ] 文档预览与在线编辑

@@ -19,7 +19,7 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
 
 
 def create_access_token(user_id: str) -> str:
-    """Create a short-lived JWT access token."""
+    """生成一个短效的JWT访问令牌。"""
     expire = datetime.now(timezone.utc) + timedelta(seconds=settings.jwt_access_expire_seconds)
     payload = {
         "sub": user_id,
@@ -30,7 +30,7 @@ def create_access_token(user_id: str) -> str:
 
 
 def create_refresh_token(user_id: str) -> str:
-    """Create a longer-lived JWT refresh token."""
+    """创建一个有效期更长的JWT刷新令牌。"""
     expire = datetime.now(timezone.utc) + timedelta(seconds=settings.jwt_refresh_expire_seconds)
     payload = {
         "sub": user_id,
@@ -41,7 +41,7 @@ def create_refresh_token(user_id: str) -> str:
 
 
 def decode_refresh_token(token: str) -> str | None:
-    """Validate a refresh token and return the user_id. Returns None on failure."""
+    """验证刷新令牌并返回用户ID。若验证失败，则返回None。"""
     try:
         payload = jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
         if payload.get("type") != "refresh":
@@ -52,7 +52,7 @@ def decode_refresh_token(token: str) -> str | None:
 
 
 def authenticate_user(db: Session, username: str, password: str) -> User | None:
-    """Verify credentials and return the User, or None on failure."""
+    """验证凭据并返回用户，若验证失败则返回None。"""
     user = db.query(User).filter(User.username == username).first()
     if user is None:
         return None
@@ -68,7 +68,7 @@ def register_user(
     email: str,
     full_name: str | None = None,
 ) -> User:
-    """Create a new user with the default 'viewer' role."""
+    """创建一个具有默认“查看者”角色的新用户。"""
     viewer_role = db.query(Role).filter(Role.name == "viewer").first()
 
     user = User(

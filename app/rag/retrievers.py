@@ -51,7 +51,7 @@ def get_bm25_retriever():
 
 
 def refresh_bm25_index_from_chroma() -> None:
-    """Re-read all chunks from Chroma and rebuild the BM25 index."""
+    """重新读取Chroma中的所有数据块，并重建BM25索引。"""
     _refresh_bm25_from_chroma()
     n = _bm25_retriever.docs  # list[str] stored inside BM25Retriever
     logger.info("BM25 index refreshed from Chroma (%d chunks)", len(n) if n else 0)

@@ -55,6 +55,12 @@ class Settings(BaseSettings):
     # Hybrid RAG 稠密向量 vs 稀疏关键词权重（0=纯BM25, 1=纯向量）
     rag_hybrid_alpha: float = 0.5
 
+    # Hybrid 检索时稠密分数的离散度下限：top-1 与 top-2 的分数差低于此值，
+    # 说明检索结果没有区分度（平带），判定为 query 与文档集无关，回退 free chat。
+    # bge-m3 的分数被压缩在窄区间内，不相关的 query 也会打出 0.44~0.50 的分数，
+    # 仅靠绝对阈值拦不住，需要看 spread 来识别"无命中"。
+    rag_hybrid_min_spread: float = 0.015
+
     # 是否启用 bge-reranker 交叉编码器重排（需 transformers + torch）
     rag_rerank_enabled: bool = False
     # 重排器模型名
@@ -62,8 +68,7 @@ class Settings(BaseSettings):
     # 重排后保留的 top_n 结果
     rag_rerank_top_n: int = 5
 
-    # RAG 相关性阈值：检索结果的相关性分数（0~1，越高越相关）低于该值时，
-    # 视为"文档中找不到相关内容"，回退到大模型自由聊天。
+    # RAG 相关性阈值：检索结果的相关性分数（0~1，越高越相关）低于该值时，视为"文档中找不到相关内容"，回退到大模型自由聊天。
     rag_min_score: float = 0.4
 
     # Upload 文件上传存储路径配置

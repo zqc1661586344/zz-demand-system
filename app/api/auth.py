@@ -29,8 +29,8 @@ router = APIRouter(prefix="/api/auth", tags=["auth"])
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def register(req: RegisterRequest, db: Session = Depends(get_db)):
-    """Register a new user and return tokens."""
-    # Check duplicate
+    """注册新用户并返回令牌。"""
+    # 检查重复
     if db.query(User).filter(User.username == req.username).first():
         raise HTTPException(status_code=400, detail="Username already exists")
     if db.query(User).filter(User.email == req.email).first():
@@ -47,7 +47,7 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
 
 @router.post("/login", response_model=TokenResponse)
 def login(req: LoginRequest, db: Session = Depends(get_db)):
-    """Authenticate and return tokens."""
+    """进行身份验证并返回令牌。"""
     user = authenticate_user(db, req.username, req.password)
     if user is None:
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -59,7 +59,7 @@ def login(req: LoginRequest, db: Session = Depends(get_db)):
 
 @router.post("/refresh", response_model=TokenResponse)
 def refresh(req: RefreshRequest, db: Session = Depends(get_db)):
-    """Exchange a refresh token for a new token pair."""
+    """用刷新令牌换取新的令牌对。"""
     user_id = decode_refresh_token(req.refresh_token)
     if user_id is None:
         raise HTTPException(status_code=401, detail="Invalid or expired refresh token")
@@ -84,7 +84,7 @@ def change_password(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """Change the current user's password."""
+    """更改当前用户的密码。"""
     if not verify_password(req.old_password, current_user.hashed_password):
         raise HTTPException(status_code=400, detail="Incorrect current password")
     current_user.hashed_password = hash_password(req.new_password)

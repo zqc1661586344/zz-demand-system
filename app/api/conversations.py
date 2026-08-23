@@ -36,7 +36,7 @@ router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
 
 def _build_history(conv, db, conv_id):
-    """Build history + summary from prior messages. Returns (history, summary, total)."""
+    """根据之前的消息构建历史记录和摘要。返回（历史记录，摘要，总数）。"""
     prior_msgs = get_messages(db, conv_id, limit=100)
     total = len(prior_msgs)
 
@@ -52,7 +52,7 @@ def _build_history(conv, db, conv_id):
 
 
 def _maybe_summarize(db, conv_id, total):
-    """Trigger summary regeneration every SUMMARY_INTERVAL messages."""
+    """每达到SUMMARY_INTERVAL条消息时触发摘要重新生成。"""
     if (total + 2) >= SUMMARY_INTERVAL and (total + 2) % SUMMARY_INTERVAL == 0:
         try:
             all_msgs = get_messages(db, conv_id, limit=100)
@@ -190,7 +190,7 @@ def query_conversation(
 
 
 def _save_messages_background(conv_id: str, query: str, answer: str, sources: list):
-    """Background task: save messages with its own DB session after stream completes."""
+    """后台任务：流处理完成后，使用自己的数据库会话保存消息。"""
     db = SessionLocal()
     try:
         add_message(db, conv_id, role="user", content=query)
