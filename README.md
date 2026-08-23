@@ -178,21 +178,22 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Q[用户提问] --> H[组装对话历史<br/>最近 5 轮 + 更早摘要]
-    H --> D{检索模式<br/>RAG_SEARCH_TYPE}
-    D -->|hybrid| DH[Chroma 稠密检索<br/>bge-m3 cosine]
-    D -->|hybrid| SH[BM25 稀疏检索<br/>jieba 分词]
-    DH --> F[RRF 融合<br/>score=Σ w/(60+rank)]
+    Q["用户提问"] --> H["组装对话历史（最近 5 轮 + 更早摘要）"]
+    H --> D{"检索模式 RAG_SEARCH_TYPE"}
+    D -->|hybrid| DH["Chroma 稠密检索<br/>bge-m3 cosine"]
+    D -->|hybrid| SH["BM25 稀疏检索<br/>jieba 分词"]
+    DH --> F["RRF 融合"]
     SH --> F
-    F --> R[可选 bge-reranker 重排]
-    D -->|similarity| SV[纯向量检索<br/>分数阈值过滤 ≥0.4]
-    D -->|mmr| MM[MMR 多样性检索<br/>λ=0.7]
-    R --> G{相关性判定}
+    F --> R["可选 bge-reranker 重排"]
+    D -->|similarity| SV["纯向量检索<br/>分数阈值过滤 ≥0.4"]
+    D -->|mmr| MM["MMR 多样性检索 λ=0.7"]
+    R --> G{"相关性判定"}
     SV --> G
     MM --> G
-    G -->|命中| C[format_context + RAG_PROMPT]
-    C --> L[LLM 生成]<br/>--> A[SSE 流式输出 + 来源引用]
-    G -->|未命中| FC[自由聊天<br/>纯 LLM 自身知识回答]
+    G -->|命中| C["format_context + RAG_PROMPT"]
+    C --> L["LLM 生成"]
+    L --> A["SSE 流式输出 + 来源引用"]
+    G -->|未命中| FC["自由聊天<br/>纯 LLM 自身知识回答"]
     FC --> A
 ```
 
