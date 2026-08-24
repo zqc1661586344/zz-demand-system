@@ -12,7 +12,9 @@ class Base(DeclarativeBase):
 
 engine = create_engine(
     settings.database_url,
-    echo=settings.app_debug,
+    # echo 交由 logging_config 统一控制（_configure_logging 已将 sqlalchemy.* 设为 WARNING）
+    # 避免 Engine 在每次执行 SQL 时重置 logger 级别覆盖我们的配置
+    echo=False,
     connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
 )
 

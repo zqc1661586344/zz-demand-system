@@ -2,6 +2,7 @@
 
 from functools import lru_cache
 
+from chromadb.config import Settings as ChromaSettings
 from langchain_chroma import Chroma
 from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStoreRetriever
@@ -15,11 +16,20 @@ logger = get_logger(__name__)
 
 @lru_cache
 def get_vector_store() -> Chroma:
-    """返回Chroma向量存储实例。"""
+    """返回Chroma向量存储实例。
+
+    这里显式关闭 Chroma 匿名遥测（anonymized_telemetry=False）：
+    Chroma 默认会上报 telemetry，其内部用 posthog SDK 发 HTTP（httpx）请求，
+    既产生噪音日志（httpx POST api.edgefn.net），又可能因 SDK 版本不兼容
+    抛错并被 chromadb.telemetry.product.posthog 打印 ERROR（capture() takes 1
+    positional argument...）。从源头关掉整条链路最干净，也无需为每个组件单独降噪。
+    """
     return Chroma(
         collection_name=settings.chroma_collection_name,
         embedding_function=get_embedding_model(),
         persist_directory=str(settings.chroma_persist_path),
+        # 关闭匿名遥测，从源头消除 posthog/httpx 噪音
+        client_settings=ChromaSettings(anonymized_telemetry=False),
         # 固定用余弦度量（cosine）+ 显式 cosine relevance 换算函数，
         # 使 relevance_score 语义统一为 1 - cosine_distance（越高越相关），
         # 且不依赖从索引遗留配置解析度量（可避开 _select_relevance_score_fn 抛错）。
