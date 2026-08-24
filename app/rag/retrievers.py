@@ -93,6 +93,29 @@ def refresh_bm25_all() -> None:
         db.close()
 
 
+def invalidate_other_users_bm25(except_user_id: str | None = None) -> None:
+    """清空其他普通用户的 BM25 缓存 —— 共享文档变更时调用。
+
+    上传/删除共享文档后，除了上传者（已单独刷新）和 __all__ 之外，
+    其他用户的 BM25 索引仍包含旧数据，需要失效化，下次查询时通过
+    get_bm25_for_user 懒加载重建。
+
+    Args:
+        except_user_id: 保留的用户 ID（通常是上传者，其 BM25 已单独刷新）
+    """
+    with _bm25_lock:
+        for key in list(_bm25_map.keys()):
+            if key == "__all__":
+                continue
+            if except_user_id is not None and key == except_user_id:
+                continue
+            _bm25_map.pop(key, None)
+    logger.info(
+        "Invalidated BM25 for other users (kept %s and __all__)",
+        except_user_id or "none",
+    )
+
+
 def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
     """懒加载获取用户的 BM25 索引（线程安全，sentinel 防重复重建）。
 
@@ -201,6 +224,19 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
         weights=[alpha, 1.0 - alpha],
         c=60,
     ).invoke(query)
+
+    # 【相关性门控】ensemble 可能因 BM25 的关键词命中而返回文档，
+    # 但余弦分数仍可能很低（无关查询）。用 k=1 的 cosine 分数做最终把关，
+    # 低于 rag_min_score → free chat。只多一次轻量查询，不做 spread。
+    if docs:
+        scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
+        if not scored or scored[0][1] < settings.rag_min_score:
+            logger.info(
+                "Hybrid BM25 path but cosine top-1=%.3f below min_score=%.3f → free chat",
+                scored[0][1] if scored else 0,
+                settings.rag_min_score,
+            )
+            return []
 
     reranked = _maybe_rerank(query, docs)
     return (reranked or docs)[:top_k]

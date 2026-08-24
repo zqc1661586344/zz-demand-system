@@ -11,10 +11,10 @@ from app.database import SessionLocal
 from app.logging_config import get_logger
 from app.models.document import Document as DocModel
 from app.models.document import DocumentChunk
+from app.rag.retrievers import invalidate_other_users_bm25, refresh_bm25_for_user
 from app.rag.splitters import get_default_splitter
 from app.rag.vector_store import add_documents_to_store, delete_documents_from_store
 from app.services.document_service import update_document_status
-from app.rag.retrievers import refresh_bm25_for_user
 
 logger = get_logger(__name__)
 
@@ -119,6 +119,9 @@ def process_document(doc_id: str) -> None:
 
         # 增量刷新该用户的 BM25 索引（从 DB 而非 Chroma 全量读取）
         refresh_bm25_for_user(str(doc.uploaded_by))
+        # 共享文档变更 → 其他用户的 BM25 缓存失效（下次查询懒加载重建）
+        if getattr(doc, "visibility", "private") == "shared":
+            invalidate_other_users_bm25(except_user_id=str(doc.uploaded_by))
 
     except Exception as e:
         logger.exception(f"Document {doc_id} processing failed")

@@ -63,16 +63,12 @@ def delete_document(db: Session, doc_id: str) -> bool:
     db.commit()  # 先提交，确保 refresh_bm25_for_user 内的独立 DB 会话能看到删除结果
 
     # 重建该用户的 BM25 索引
-    from app.rag.retrievers import refresh_bm25_for_user
+    from app.rag.retrievers import invalidate_other_users_bm25, refresh_bm25_for_user
 
     refresh_bm25_for_user(owner_id)
     if visibility == "shared":
-        # 共享文档变更后，清空 superuser 的全量缓存，下次查询懒加载
-        import threading
-        from app.rag.retrievers import _bm25_lock, _bm25_map
-
-        with _bm25_lock:
-            _bm25_map.pop("__all__", None)
+        # 共享文档变更 → 其他用户的 BM25 缓存失效（下次查询懒加载重建）
+        invalidate_other_users_bm25(except_user_id=owner_id)
 
     # Remove file from disk
     if doc.file_path and os.path.exists(doc.file_path):
