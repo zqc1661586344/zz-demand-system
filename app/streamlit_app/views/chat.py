@@ -21,12 +21,15 @@ def _ensure_conversation() -> str:
     """Get or create the current conversation ID from session state."""
     conv_id = st.session_state.get("conv_id")
     if conv_id:
+        # Persist to URL so page refresh (F5) can recover it
+        st.query_params["conv_id"] = conv_id
         return conv_id
 
     try:
         data = request("POST", "/api/conversations", json={})
         conv_id = data["id"]
         st.session_state["conv_id"] = conv_id
+        st.query_params["conv_id"] = conv_id  # persist for refresh
         return conv_id
     except ApiError as e:
         st.error(f"创建对话失败：{e.detail}")
@@ -82,6 +85,13 @@ def _display_messages():
 def page():
     """Chat page UI — rendered inside the main app's tab."""
     conv_id = st.session_state.get("conv_id")
+
+    # Recover conv_id from URL query param on page refresh (F5)
+    if conv_id is None:
+        url_conv_id = st.query_params.get("conv_id")
+        if url_conv_id:
+            conv_id = url_conv_id
+            st.session_state["conv_id"] = conv_id
 
     # Load messages if we have a conversation but none in state yet
     if conv_id and "conv_messages" not in st.session_state:
@@ -192,3 +202,4 @@ def new_conversation():
     """Start a new conversation."""
     st.session_state["conv_id"] = None
     st.session_state["conv_messages"] = []
+    st.query_params.pop("conv_id", None)  # clear URL param too
