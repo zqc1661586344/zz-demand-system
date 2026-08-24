@@ -1,27 +1,35 @@
 """混合检索器——BM25稀疏+Chroma密集+RRF融合+可选交叉编码器重新排序。
 
-Usage:
-    hybrid_search(query, top_k=5) → list[Document]
-        chain.py中的检索入口点。
-        根据配置，使用similarity_search、mmr_search或混合（BM25 + RRF）算法。
+核心设计：每个用户拥有独立的 BM25 索引（含私有文档 + 全部共享文档），
+superuser 使用 "__all__" 键的全量索引。
 
-    refresh_bm25_index_from_chroma()
-        根据Chroma的完整区块内容重建BM25索引。
-        在文档上传或删除后调用。
+Usage:
+    hybrid_search(query, top_k=5, user_id=None) → list[Document]
+        chain.py中的检索入口点。
 """
 
-from app.logging_config import get_logger
+import json
+import threading
 
 import jieba
 from langchain_core.documents import Document
 
 from app.config import settings
-from app.rag.vector_store import get_vector_store, similarity_search_with_relevance
+from app.logging_config import get_logger
 
 
 logger = get_logger(__name__)
 
 jieba.initialize()  # 模块加载时预热，不要等到查询
+
+
+# ---------------------------------------------------------------------------
+# Per-user BM25 indexes (in-memory, rebuilt from DocumentChunk on changes)
+# ---------------------------------------------------------------------------
+_bm25_map: dict[str, "BM25Retriever | None"] = {}  # key: user_id or "__all__"
+_bm25_lock = threading.Lock()
+# "加载中"标记：防止 TOCTOU 竞态下多个线程同时重建同一用户的 BM25 索引
+_LOADING: "BM25Retriever | None" = object()  # type: ignore[assignment]
 
 
 def _chinese_tokenizer(text: str) -> list[str]:
@@ -31,119 +39,178 @@ def _chinese_tokenizer(text: str) -> list[str]:
     对中文会退化成单字（unigram）匹配，查准率低。用 jieba 后整个词语作为一个
     term 参与 BM25 的 IDF / 词频计算，显著提升中文相关性。
     """
-    # jieba.lcut 对中文精确分词；对纯英文串 jieba 会原样返回（作为一个 token）。
-    # 这里对每个 token 再走一次 default 的前处理仅作边界处理，无需过度复杂。
     return [t for t in jieba.lcut(text) if t.strip()]
 
 
 # ---------------------------------------------------------------------------
-# Global BM25 retriever (in-memory, rebuilt from Chroma on changes)
+# Public API — per-user BM25 refresh
 # ---------------------------------------------------------------------------
-_bm25_retriever = None  # BM25Retriever instance
+def refresh_bm25_for_user(user_id: str) -> None:
+    """从 document_chunks 读取该用户的私有 + 全部共享文档，重建 BM25。
+
+    Args:
+        user_id: 用户ID。若传入 "__all__" 则重建全量 BM25 索引（供 superuser 使用）。
+    """
+    if user_id == "__all__":
+        refresh_bm25_all()
+        return
+
+    from app.database import SessionLocal
+    from app.models.document import Document, DocumentChunk
+
+    db = SessionLocal()
+    try:
+        chunks = (
+            db.query(DocumentChunk)
+            .join(Document, DocumentChunk.document_id == Document.id)
+            .filter(
+                (Document.uploaded_by == user_id) | (Document.visibility == "shared"),
+                DocumentChunk.content.isnot(None),
+            )
+            .all()
+        )
+        texts = [c.content for c in chunks]
+        metadatas = [json.loads(c.meta_json) if c.meta_json else {} for c in chunks]
+
+        _rebuild_bm25_for_key(user_id, texts, metadatas)
+    finally:
+        db.close()
 
 
-def get_bm25_retriever():
-    """BM25检索器支持延迟访问；首次调用时，从Chroma自动刷新。"""
-    global _bm25_retriever
-    if _bm25_retriever is None:
-        _refresh_bm25_from_chroma()
-    return _bm25_retriever
+def refresh_bm25_all() -> None:
+    """从 document_chunks 读取全部文档，重建全量 BM25（供 superuser "__all__" 使用）。"""
+    from app.database import SessionLocal
+    from app.models.document import DocumentChunk
+
+    db = SessionLocal()
+    try:
+        chunks = db.query(DocumentChunk).filter(DocumentChunk.content.isnot(None)).all()
+        texts = [c.content for c in chunks]
+        metadatas = [json.loads(c.meta_json) if c.meta_json else {} for c in chunks]
+
+        _rebuild_bm25_for_key("__all__", texts, metadatas)
+    finally:
+        db.close()
 
 
-def refresh_bm25_index_from_chroma() -> None:
-    """重新读取Chroma中的所有数据块，并重建BM25索引。"""
-    _refresh_bm25_from_chroma()
-    n = _bm25_retriever.docs if _bm25_retriever else None
-    logger.info("BM25 index refreshed from Chroma (%d chunks)", len(n) if n else 0)
+def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
+    """懒加载获取用户的 BM25 索引（线程安全，sentinel 防重复重建）。
+
+    Args:
+        user_id: 用户ID。None 表示 superuser（使用 "__all__" 索引）。
+
+    Returns:
+        BM25Retriever 实例，或 None（无数据/正在加载中）。
+    """
+    key = user_id if user_id is not None else "__all__"
+    with _bm25_lock:
+        if key in _bm25_map:
+            cached = _bm25_map[key]
+            return cached if cached is not _LOADING else None
+        # 标记为"加载中"，阻止其他线程重复重建
+        _bm25_map[key] = _LOADING  # type: ignore[assignment]
+    # 在锁外执行 DB 重建（避免锁内 IO）
+    if key == "__all__":
+        refresh_bm25_all()
+    else:
+        refresh_bm25_for_user(key)
+    with _bm25_lock:
+        return _bm25_map.get(key)
 
 
-def _refresh_bm25_from_chroma() -> None:
-    """内部任务：通过从Chroma中提取文本和元数据来重建_bm25_检索器。"""
-    global _bm25_retriever
-
+def _rebuild_bm25_for_key(key: str, texts: list[str], metadatas: list[dict]) -> None:
+    """线程安全地重建单个用户的 BM25 索引。"""
     from langchain_community.retrievers import BM25Retriever
 
-    try:
-        vs = get_vector_store()
-        data = vs.get()  # {"documents": [...], "metadatas": [...], "ids": [...]}
-        texts = data.get("documents", []) or []
-        metadatas = data.get("metadatas", []) or []
-
+    with _bm25_lock:
         if not texts:
-            logger.info("Chroma 为空 — BM25 索引置为 None")
-            _bm25_retriever = None
+            _bm25_map[key] = None
+            logger.info("BM25 for %s: empty (no chunks)", key)
             return
 
-        _bm25_retriever = BM25Retriever.from_texts(
+        _bm25_map[key] = BM25Retriever.from_texts(
             texts,
             metadatas=metadatas,
             k=settings.rag_rerank_top_n if settings.rag_rerank_enabled else 5,
             preprocess_func=_chinese_tokenizer,
         )
-        logger.info("BM25 index built from %d chunks", len(texts))
-    except Exception as exc:
-        logger.warning("BM25 index refresh failed: %s", exc)
-        _bm25_retriever = None
+        logger.info("BM25 for %s: built from %d chunks", key, len(texts))
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible alias for existing callers (e.g. tests)
+# ---------------------------------------------------------------------------
+def refresh_bm25_index_from_chroma() -> None:
+    """（已废弃）向后兼容别名。新代码请直接调用 refresh_bm25_for_user。"""
+    logger.warning("refresh_bm25_index_from_chroma() is deprecated, use refresh_bm25_for_user()")
+    refresh_bm25_all()
 
 
 # ---------------------------------------------------------------------------
 # Hybrid search — Chroma dense + BM25 sparse → Ensemble (RRF fusion)
 # ---------------------------------------------------------------------------
-def hybrid_search(query: str, top_k: int = 5) -> list[Document]:
+def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Document]:
     """混合检索：Chroma稠密 + BM25稀疏 → RRF融合（通过EnsembleRetriever）。
 
-    返回按RRF分数降序排序的文档。无阈值过滤。已应用（RRF分数并非相似性语义）。结果数量为限制在*top_k*以内。
-    当`rag_search_type != "hybrid"`时，将回退到纯密集（相似度/最大相关度）。
+    【相关性判定策略】
+      - BM25 有数据 → 跳过 cosine spread 检查（关键词命中本身已说明相关）
+      - BM25 无数据 → 回退纯稠密 + spread 检查判断 free_chat
+
+    Args:
+        query: 查询字符串
+        top_k: 返回文档数量上限
+        user_id: 用户ID（None=superuser，全量检索）
+
+    Returns:
+        排序后的 Document 列表，或空列表（free chat）。
     """
-    if settings.rag_search_type != "hybrid":
-        # Backward-compatible fallback to non-hybrid modes
-        from app.rag.vector_store import mmr_search
 
-        if settings.rag_search_type == "mmr":
-            return mmr_search(query, k=top_k)
+    from app.rag.vector_store import _user_where, get_vector_store, similarity_search_with_relevance
 
-        scored = similarity_search_with_relevance(query, k=top_k)
-        return [doc for doc, score in scored if score >= settings.rag_min_score]
+    # 1. 检查 BM25 是否可用（有 BM25 数据 → 跳过 spread 检查）
+    sparse = get_bm25_for_user(user_id)
+    if sparse is None:
+        # 该用户没有 BM25 数据 → 纯稠密，做 spread 判定
+        scored = similarity_search_with_relevance(query, k=min(top_k, 4), user_id=user_id)
+        if not scored:
+            return []
+        top1, spread = scored[0][1], (scored[0][1] - scored[1][1] if len(scored) >= 2 else 1.0)
+        if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
+            logger.info(
+                "Dense-only top-1=%.3f spread=%.3f (min=%.3f/%.3f) → free chat",
+                top1, spread, settings.rag_min_score, settings.rag_hybrid_min_spread,
+            )
+            return []
+        vs = get_vector_store()
+        return vs.as_retriever(search_kwargs={
+            "k": top_k, "filter": _user_where(user_id),
+        }).invoke(query)[:top_k]
+
+    # 2. BM25 有命中 → 无需 spread，直接 ensemble
+    sparse.k = top_k
+    vs = get_vector_store()
+    dense_retriever = vs.as_retriever(search_kwargs={
+        "k": top_k, "filter": _user_where(user_id),
+    })
 
     from langchain_classic.retrievers import EnsembleRetriever
 
-    # 1. Dense retriever from Chroma
-    vs = get_vector_store()
-    dense_retriever = vs.as_retriever(search_kwargs={"k": top_k})
-
-    # 2. Sparse retriever (BM25)
-    sparse = get_bm25_retriever()
-    if sparse is None:
-        # Chroma 为空（例如所有文档被删除后）→ 无 BM25 可融合，回退到纯稠密检索
-        return dense_retriever.invoke(query)[:top_k]
-    sparse.k = top_k
-
-    # 3. Ensemble with weighted RRF
     alpha = settings.rag_hybrid_alpha
-    ensemble = EnsembleRetriever(
+    docs = EnsembleRetriever(
         retrievers=[dense_retriever, sparse],
         weights=[alpha, 1.0 - alpha],
         c=60,
-    )
+    ).invoke(query)
 
-    docs = ensemble.invoke(query)
-
-    # 可选项3，可以执行rerank
     reranked = _maybe_rerank(query, docs)
-    if reranked is not None:
-        return reranked
-
-    return docs[:top_k]
+    return (reranked or docs)[:top_k]
 
 
 # ---------------------------------------------------------------------------
 # Optional cross-encoder reranker
 # ---------------------------------------------------------------------------
 def _maybe_rerank(query: str, docs: list[Document]) -> list[Document] | None:
-    """如果重新排序器已启用且依赖关系可用，则对*文档*进行重新排序。
-
-    返回重新排序后的前N个文档，或者当重新排序器被禁用或不可用时返回None。
-    """
+    """如果重新排序器已启用且依赖关系可用，则对文档进行重新排序。返回重新排序后的前N个文档，或者当重新排序器被禁用或不可用时返回 None。"""
     if not settings.rag_rerank_enabled:
         return None
 
@@ -152,9 +219,8 @@ def _maybe_rerank(query: str, docs: list[Document]) -> list[Document] | None:
         return None
 
     from langchain_classic.retrievers import ContextualCompressionRetriever
-
-    # Use a thin InMemoryVectorStore to let the compressor work over *docs*
     from langchain_community.vectorstores import InMemoryVectorStore
+
     from app.rag.embeddings import get_embedding_model
 
     try:
@@ -165,37 +231,43 @@ def _maybe_rerank(query: str, docs: list[Document]) -> list[Document] | None:
             base_retriever=base_retriever,
         )
         return compressor.invoke(query)[: settings.rag_rerank_top_n]
-    except Exception as exc:
-        logger.warning("Reranker failed, falling back to unranked results: %s", exc)
+    except Exception as exc:  # noqa: BLE001 — broad catch is intentional: fall back gracefully
+        logger.warning("reranker failed, falling back to unranked results: %s", exc)
         return None
 
 
 _built_reranker = None
+_reranker_lock = threading.Lock()
 
 
 def _build_reranker():
-    """延迟构建并缓存跨编码器压缩器。"""
+    """延迟构建并缓存跨编码器压缩器（线程安全）。"""
     global _built_reranker
     if _built_reranker is not None:
-        return _built_reranker
+        return _built_reranker if _built_reranker is not False else None
 
-    try:
-        from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
-        from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+    with _reranker_lock:
+        # double-check
+        if _built_reranker is not None:
+            return _built_reranker if _built_reranker is not False else None
 
-        model = HuggingFaceCrossEncoder(model_name=settings.rag_rerank_model)
-        _built_reranker = CrossEncoderReranker(model=model, top_n=settings.rag_rerank_top_n)
-        logger.info(
-            "Reranker loaded: %s (top_n=%s)",
-            settings.rag_rerank_model,
-            settings.rag_rerank_top_n,
-        )
-        return _built_reranker
-    except ImportError:
-        logger.warning("transformers / torch not installed — reranker unavailable")
-        _built_reranker = False  # sentinel: don't retry every call
-        return None
-    except Exception as exc:
-        logger.warning("Failed to load reranker model: %s", exc)
-        _built_reranker = False
-        return None
+        try:
+            from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
+            from langchain_community.cross_encoders import HuggingFaceCrossEncoder
+
+            model = HuggingFaceCrossEncoder(model_name=settings.rag_rerank_model)
+            _built_reranker = CrossEncoderReranker(model=model, top_n=settings.rag_rerank_top_n)
+            logger.info(
+                "Reranker loaded: %s (top_n=%s)",
+                settings.rag_rerank_model,
+                settings.rag_rerank_top_n,
+            )
+            return _built_reranker
+        except ImportError:
+            logger.warning("transformers / torch not installed — reranker unavailable")
+            _built_reranker = False  # sentinel: don't retry every call
+            return None
+        except Exception as exc:
+            logger.warning("Failed to load reranker model: %s", exc)
+            _built_reranker = False
+            return None

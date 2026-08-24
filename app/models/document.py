@@ -29,6 +29,7 @@ class Document(Base):
     chunk_count = Column(Integer, default=0)
     error_message = Column(Text, nullable=True)
     uploaded_by = Column(String(36), ForeignKey("users.id"), nullable=False)
+    visibility = Column(String(20), default="private")  # "private" | "shared"
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))
     updated_at = Column(
         DateTime,

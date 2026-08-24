@@ -170,10 +170,15 @@ def query_conversation(
     # Build history: summary for old rounds + recent messages
     history, summary, total = _build_history(conv, db, conv_id)
 
+    # 构造 user_id：superuser 传 None（全量检索），普通用户传自己的 id
+    uid = None if current_user.is_superuser else str(current_user.id)
+
     # Always run RAG against the single document collection
     free_chat = False
     try:
-        result = query_rag(query=req.query, top_k=req.top_k, history=history, summary=summary)
+        result = query_rag(
+            query=req.query, top_k=req.top_k, history=history, summary=summary, user_id=uid
+        )
         answer = result["answer"]
         sources = result["sources"]
         free_chat = bool(result.get("free_chat", False))
@@ -222,14 +227,25 @@ def query_conversation_stream(
 ):
     """流式RAG查询 — SSE标记流，然后是源数据+数据库保存。"""
     logger.info("stream query begin...")
+
+    # 根据ID获取对话
     conv = get_conversation_by_id(db, conv_id)
     if conv is None:
+        logger.error(f"conversation:{conv_id} not found")
         raise HTTPException(status_code=404, detail="Conversation not found")
 
+    # 检查用户权限：只有创建者或超级用户可以访问
     if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
+        logger.error(f"access denied for user:{current_user.id} to conversation:{conv_id}")
         raise HTTPException(status_code=403, detail="Access denied")
 
+    # TODO: 有可优化的点，如果用户连续提问，可以复用历史
+    # 构建历史：旧轮次摘要+最新消息（最近20轮）
     history, summary, total = _build_history(conv, db, conv_id)
+
+    # superuser：None（全量可见）
+    # 普通用户： current_user.id
+    uid = None if current_user.is_superuser else str(current_user.id)
 
     def event_stream():
         free_chat = False
@@ -239,7 +255,7 @@ def query_conversation_stream(
         db.commit()
         try:
             for event in query_rag_stream(
-                query=req.query, top_k=req.top_k, history=history, summary=summary
+                query=req.query, top_k=req.top_k, history=history, summary=summary, user_id=uid
             ):
                 if event["type"] == "token":
                     yield f"data: {json.dumps({'token': event['data']})}\n\n"
@@ -256,12 +272,12 @@ def query_conversation_stream(
                         sources,
                         free_chat,
                     )
-                    # Also trigger summary regeneration in background
+                    # 同时在后台触发摘要重新生成
                     background_tasks.add_task(_maybe_summarize_background, conv_id, total)
                     yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
                     yield "data: [DONE]\n\n"
         except Exception as e:
-            logger.warning("Streaming RAG query failed: %s", e)
+            logger.warning("streaming RAG query failed: %s", e)
             yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
             yield "data: [DONE]\n\n"
 

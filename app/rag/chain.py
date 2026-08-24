@@ -1,5 +1,7 @@
 """RAG chain — query, retrieve, generate."""
 
+import threading
+
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -67,20 +69,23 @@ def format_history(messages: list[dict] | None = None, summary: str | None = Non
         if summary:
             parts.append("[Recent messages]")
         parts.append("\n".join(lines))
-    return "\n\n".join(parts) if parts else "(no prior conversation)"
+    return "\n\n".join(parts) if parts else ""
 
 
 # RAG链的模块级缓存——一次构建，跨查询复用
 _rag_chain = None
+_chain_lock = threading.Lock()
 
 
 def build_rag_chain():
-    """构建或返回RAG链缓存: prompt → LLM → output parser."""
+    """构建或返回RAG链缓存: prompt → LLM → output parser（线程安全）。"""
     global _rag_chain
 
     if _rag_chain is None:
-        llm = get_llm()
-        _rag_chain = RunnablePassthrough() | RAG_PROMPT | llm | StrOutputParser()
+        with _chain_lock:
+            if _rag_chain is None:  # double-check
+                llm = get_llm()
+                _rag_chain = RunnablePassthrough() | RAG_PROMPT | llm | StrOutputParser()
 
     return _rag_chain
 
@@ -105,77 +110,72 @@ _free_chat_chain = None
 
 
 def _build_free_chat_chain():
-    """构建或返回自由聊天链缓存（无文档上下文，纯 LLM 回答）。"""
+    """构建或返回自由聊天链缓存（线程安全）。"""
     global _free_chat_chain
 
     if _free_chat_chain is None:
-        llm = get_llm()
-        _free_chat_chain = FREE_CHAT_PROMPT | llm | StrOutputParser()
+        with _chain_lock:
+            if _free_chat_chain is None:
+                llm = get_llm()
+                _free_chat_chain = FREE_CHAT_PROMPT | llm | StrOutputParser()
 
     return _free_chat_chain
 
 
-def _retrieve_relevant_docs(query: str, top_k: int) -> list:
-    """按配置的检索算法取回文档，并用相关性阈值过滤掉不相关的结果。
+def _retrieve_relevant_docs(query: str, top_k: int, user_id: str | None = None) -> list:
+    """按配置的检索算法取回文档，并用相关性阈值过滤掉不相关的结果。返回的列表为空表示"文档中没有相关内容"，调用方应回退到自由聊天。"""
 
-    返回的列表为空表示"文档中没有相关内容"，调用方应回退到自由聊天。
-    """
+    # 混合检索（spread 判定已在 hybrid_search 内部完成，无需再重复查 Chroma）
     if settings.rag_search_type == "hybrid":
+        logger.info("rag search type is hybrid")
+
         from app.rag.retrievers import hybrid_search
 
-        docs = hybrid_search(query, top_k=top_k)
-        if docs:
-            # 后置过滤：hybrid 的 RRF 分数不是相似度语义，不可直接阈值过滤，改用
-            # 稠密检索的真实相似度分数来判定 query 是否真的命中了文档。
-            # bge-m3 对不相关 query 也可能打出较高的绝对分数（紧凑分布），因此
-            # 用「绝对阈值 + 分数离散度」两个判据：top-1 过低，或与 top-2 的差距
-            # 太小（无区分度、呈平带），都视为未命中，回退 free chat。
-            scored = similarity_search_with_relevance(query, k=2)
-            if scored:
-                top1 = scored[0][1]
-                if len(scored) < 2:
-                    spread = 1.0
-                else:
-                    spread = top1 - scored[1][1]
-                if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
-                    logger.info(
-                        "Hybrid top-1=%.3f spread=%.3f (min_score=%.3f, min_spread=%.3f) "
-                        "→ 判定未命中，回退自由聊天",
-                        top1,
-                        spread,
-                        settings.rag_min_score,
-                        settings.rag_hybrid_min_spread,
-                    )
-                    return []
+        return hybrid_search(query, top_k=top_k, user_id=user_id)
+
+    # 最大边际相关性——先查再按 cosine 分数阈值过滤，不够的走 free chat
+    elif settings.rag_search_type == "mmr":
+        logger.info("rag search type is mmr")
+        docs = mmr_search(query, k=top_k, user_id=user_id)
+        if not docs:
+            return []
+        scored = similarity_search_with_relevance(query, k=len(docs), user_id=user_id)
+        if scored and scored[0][1] < settings.rag_min_score:
+            logger.info(
+                "MMR top-1=%.3f below min_score=%.3f → reverting to free chat",
+                scored[0][1],
+                settings.rag_min_score,
+            )
+            return []
         return docs
 
-    if settings.rag_search_type == "mmr":
-        # MMR 不直接返回距离分，此处保持与阈值无关（文档非空即视为相关）。
-        return mmr_search(query, k=top_k)
+    # 普通纯向量相关性
+    else:
+        scored = similarity_search_with_relevance(query, k=top_k, user_id=user_id)
+        logger.info(
+            "rag serach type is chroma, query=%r scores=%s threshold=%s → retained document count=%d",
+            query[:50],
+            [round(s, 3) for _, s in scored],
+            settings.rag_min_score,
+            sum(1 for _, s in scored if s >= settings.rag_min_score),
+        )
 
-    scored = similarity_search_with_relevance(query, k=top_k)
-    # 诊断日志：打印本次检索的实际相关性分数，便于判断阈值是否合理、
-    # 或是否因旧的 l2 索引导致分数失真（分数远超出 [0,1] 即说明索引不是 cosine）。
-    logger.info(
-        "检索 query=%r scores=%s 阈值=%s → 保留文档数=%d",
-        query[:50],
-        [round(s, 3) for _, s in scored],
-        settings.rag_min_score,
-        sum(1 for _, s in scored if s >= settings.rag_min_score),
-    )
-    # 相关性分数低于阈值的认定为"文档中找不到相关内容"
-    return [doc for doc, score in scored if score >= settings.rag_min_score]
+        return [doc for doc, score in scored if score >= settings.rag_min_score]
 
 
 def query_rag(
-    query: str, top_k: int = 5, history: list[dict] | None = None, summary: str | None = None
+    query: str,
+    top_k: int = 5,
+    history: list[dict] | None = None,
+    summary: str | None = None,
+    user_id: str | None = None,
 ) -> dict:
     """运行完整的RAG查询: retrieve contexts, generate answer, return sources."""
     # Format history into prompt context
     history_text = format_history(history, summary=summary)
 
     # 检索相关文档（带相关性分数，用于阈值过滤）
-    docs = _retrieve_relevant_docs(query, top_k)
+    docs = _retrieve_relevant_docs(query, top_k, user_id=user_id)
 
     if not docs:
         # 检索为空或相关性不足 → 不走 RAG，改为纯 LLM 自由聊天（基于自身知识回答，不附带来源）。
@@ -206,15 +206,20 @@ def query_rag(
 
 
 def query_rag_stream(
-    query: str, top_k: int = 5, history: list[dict] | None = None, summary: str | None = None
+    query: str,
+    top_k: int = 5,
+    history: list[dict] | None = None,
+    summary: str | None = None,
+    user_id: str | None = None,
 ):
     """流式RAG查询，逐个token产出，最后一个event包含sources和完整answer。"""
     history_text = format_history(history, summary=summary)
 
-    docs = _retrieve_relevant_docs(query, top_k)
+    # 检索相关文档（带相关性分数，用于阈值过滤）
+    docs = _retrieve_relevant_docs(query, top_k, user_id=user_id)
 
     if not docs:
-        # 【根治】：提示语由前端按 free_chat 标记渲染，不进入模型输出路径
+        # 提示语由前端按 free_chat 标记渲染，不进入模型输出路径
         yield {"type": "free_chat", "data": True}
         full_answer = ""
         chain = _build_free_chat_chain()
@@ -258,12 +263,14 @@ _summary_chain = None
 
 
 def _build_summary_chain():
-    """构建或返回summary链: prompt → LLM → output parser。多轮对话时用于生成摘要。"""
+    """构建或返回summary链: prompt → LLM → output parser（线程安全）。多轮对话时用于生成摘要。"""
     global _summary_chain
 
     if _summary_chain is None:
-        llm = get_llm()
-        _summary_chain = SUMMARY_PROMPT | llm | StrOutputParser()
+        with _chain_lock:
+            if _summary_chain is None:
+                llm = get_llm()
+                _summary_chain = SUMMARY_PROMPT | llm | StrOutputParser()
 
     return _summary_chain
 

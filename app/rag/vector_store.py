@@ -14,6 +14,23 @@ from app.rag.embeddings import get_embedding_model
 logger = get_logger(__name__)
 
 
+def _user_where(user_id: str | None) -> dict | None:
+    """构建用户级Chroma过滤条件。
+
+    普通用户只能看到自己的私有文档 + 所有共享文档；
+    superuser（user_id=None）不设过滤，全量可见。
+
+    Args:
+        user_id: 用户ID。None 表示 superuser，不设过滤。
+
+    Returns:
+        Chroma where filter dict，或 None（不过滤）。
+    """
+    if user_id is None:
+        return None
+    return {"$or": [{"uploaded_by": {"$eq": user_id}}, {"visibility": {"$eq": "shared"}}]}
+
+
 @lru_cache
 def get_vector_store() -> Chroma:
     """返回Chroma向量存储实例。
@@ -63,36 +80,41 @@ def delete_documents_from_store(doc_id: str) -> None:
         logger.exception(f"Chroma delete failed for document {doc_id}: {e}")
 
 
-def get_retriever(k: int = 5) -> VectorStoreRetriever:
-    """为单个collection返回一个检索器。"""
+def get_retriever(k: int = 5, user_id: str | None = None) -> VectorStoreRetriever:
+    """为单个collection返回一个检索器，支持按用户过滤。"""
     vs = get_vector_store()
-    return vs.as_retriever(search_kwargs={"k": k})
+    search_kwargs: dict = {"k": k}
+    where = _user_where(user_id)
+    if where is not None:
+        search_kwargs["filter"] = where
+    return vs.as_retriever(search_kwargs=search_kwargs)
 
 
-def similarity_search(query: str, k: int = 5) -> list[Document]:
-    """对单个collection进行相似度搜索。"""
+def similarity_search(query: str, k: int = 5, user_id: str | None = None) -> list[Document]:
+    """对单个collection进行相似度搜索，支持按用户过滤。"""
     vs = get_vector_store()
-    return vs.similarity_search(query, k=k)
+    return vs.similarity_search(query, k=k, filter=_user_where(user_id))
 
 
 def mmr_search(
-    query: str, k: int = 5, fetch_k: int = 20, lambda_mult: float = 0.7
+    query: str, k: int = 5, fetch_k: int = 20, lambda_mult: float = 0.7, user_id: str | None = None
 ) -> list[Document]:
-    """按 Maximal Marginal Relevance 检索——平衡相关性与多样性。"""
+    """按 Maximal Marginal Relevance 检索——平衡相关性与多样性，支持按用户过滤。"""
     vs = get_vector_store()
     return vs.max_marginal_relevance_search(
-        query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult
+        query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, filter=_user_where(user_id)
     )
 
 
-def similarity_search_with_relevance(query: str, k: int = 5) -> list[tuple[Document, float]]:
-    """相似度搜索，返回 (Document, relevance_score) 元组列表。
+def similarity_search_with_relevance(
+    query: str, k: int = 5, user_id: str | None = None
+) -> list[tuple[Document, float]]:
+    """相似度搜索，返回 (Document, relevance_score) 元组列表，支持按用户过滤。
 
     relevance_score 由 get_vector_store 里显式指定的 cosine 换算函数计算：
     score = 1 - cosine_distance，值域约 [0, 2]，越高越相关（>1 表示极强相关，
     正常相关文档通常在 [0, 1] 区间）。由调用方按 rag_min_score 阈值判断是否采用。
     """
     vs = get_vector_store()
-    # relevance_score_fn 已在 Chroma 构造时显式给定，因此无论集合实际度量如何，
-    # 这里都会用同一换算逻辑，不会因旧 l2 索引而错乱。
-    return vs.similarity_search_with_relevance_scores(query, k=k)
+    # relevance_score_fn 已在 Chroma 构造时显式给定，因此无论集合实际度量如何，这里都会用同一换算逻辑，不会因旧 l2 索引而错乱。
+    return vs.similarity_search_with_relevance_scores(query, k=k, filter=_user_where(user_id))

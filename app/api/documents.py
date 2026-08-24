@@ -21,17 +21,22 @@ from app.services.document_service import (
 )
 from app.rag.pipeline import process_document
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
 
 @router.post("/upload", response_model=DocumentUploadResponse, status_code=201)
 async def upload_document(
     file: UploadFile = File(...),
+    visibility: str = "private",
     background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # Validate file type — check MIME type first, then fall back to extension
+    # 验证文件类型 — 先检查 MIME 类型，若无法确定则根据扩展名判断
     mime_to_ext = {
         "application/pdf": ".pdf",
         "text/plain": ".txt",
@@ -42,31 +47,36 @@ async def upload_document(
 
     # 优先用客户端上报的 Content-Type；命中即采用
     mime_type = file.content_type or ""
+    logger.info("file name: %s, file content_type: %s", file.filename, mime_type)
     if mime_type not in mime_to_ext:
-        # 浏览器对 .md/.txt 等常上报 application/octet-stream，
-        # 改为按文件名后缀反推真实 MIME（用 Path.suffix，确定性更强，
-        # 不依赖 mimetypes 系统数据库在 Windows/macOS/Linux 上的差异）。
+        # 浏览器对 .md/.txt 等常上报 application/octet-stream，改为按文件名后缀反推真实 MIME（用 Path.suffix，确定性更强，不依赖 mimetypes 系统数据库在 Windows/macOS/Linux 上的差异）。
         suffix = Path(file.filename or "").suffix.lower()
         if suffix in ext_to_mime:
             mime_type = ext_to_mime[suffix]
+        logger.info("file real content_type: %s", mime_type)
 
     if mime_type not in mime_to_ext:
+        logger.error("unsupported file type: %s", mime_type)
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type: {file.filename or mime_type}",
         )
+
     ext = mime_to_ext[mime_type]
 
-    # Save file to disk
+    # 上传文档存盘
+    # TODO：考虑用异步任务处理文件上传和解析，避免阻塞主线程
     os.makedirs(settings.upload_path, exist_ok=True)
     stored_name = f"{uuid.uuid4().hex}{ext}"
     file_path = settings.upload_path / stored_name
+    logger.info("file_path: %s", file_path)
 
+    # TODO: 检查文件大小，限制上传文件大小
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
 
-    # Create DB record
+    # 文档信息存入数据库
     doc = create_document(
         db=db,
         filename=stored_name,
@@ -74,9 +84,11 @@ async def upload_document(
         file_size=len(content),
         mime_type=mime_type,
         uploaded_by=current_user.id,
+        visibility=visibility,
     )
+    logger.info("document created in db, doc name: %s, doc id: %s", file.filename, doc.id)
 
-    # Trigger async processing pipeline
+    # 触发异步处理管道，处理文档内容（向量化、BM25等）
     background_tasks.add_task(process_document, doc.id)
 
     return DocumentUploadResponse(id=doc.id, filename=stored_name, status="pending")
