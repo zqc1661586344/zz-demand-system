@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.api.router import api_router
 from app.database import init_db, SessionLocal
+from app.logging_config import _configure_logging
 from app.models.user import User, Role
 from app.services.auth_service import hash_password
 
@@ -38,7 +39,8 @@ def _seed_demo_user():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifecycle: initialize database on startup."""
+    """应用程序生命周期：在启动时初始化日志记录和数据库。"""
+    _configure_logging()
     init_db()
     _seed_demo_user()
     yield

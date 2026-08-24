@@ -1,19 +1,19 @@
 """Document processing pipeline — parse, split, embed, index."""
 
-import logging
 from pathlib import Path
 
 from langchain_core.documents import Document
 from sqlalchemy.orm import Session
 
 from app.database import SessionLocal
+from app.logging_config import get_logger
 from app.models.document import Document as DocModel
 from app.rag.splitters import get_default_splitter
 from app.rag.vector_store import add_documents_to_store, delete_documents_from_store
 from app.services.document_service import update_document_status
 from app.rag.retrievers import refresh_bm25_index_from_chroma
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def load_document(file_path: str, mime_type: str) -> list[Document]:

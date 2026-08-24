@@ -1,14 +1,14 @@
 """Document management page — list, upload, delete documents."""
 
-import logging
 import os
 import tempfile
 
 import streamlit as st
 
+from app.logging_config import get_logger
 from app.streamlit_app.api_client import ApiError, delete, get, upload
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 SUPPORTED_EXTENSIONS = [".pdf", ".txt", ".md", ".docx"]
 MAX_SIZE_MB = 50

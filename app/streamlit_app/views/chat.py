@@ -1,15 +1,15 @@
 """Chat page — SSE streaming conversation."""
 
 import json
-import logging
 from datetime import datetime
 
 import httpx
 import streamlit as st
 
+from app.logging_config import get_logger
 from app.streamlit_app.api_client import BASE_URL, ApiError, request
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 TOP_K = 5
 

@@ -19,15 +19,14 @@ _proj_root = str(Path(__file__).resolve().parent.parent.parent)
 if _proj_root not in sys.path:
     sys.path.insert(0, _proj_root)
 
-import logging
-
 import streamlit as st
 
+from app.logging_config import get_logger
 from app.streamlit_app.auth import auto_login
 from app.streamlit_app.views.chat import new_conversation, page as chat_page
 from app.streamlit_app.views.documents import page as documents_page
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def main():

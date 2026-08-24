@@ -10,7 +10,7 @@ Usage:
         在文档上传或删除后调用。
 """
 
-import logging
+from app.logging_config import get_logger
 
 import jieba
 from langchain_core.documents import Document
@@ -19,7 +19,7 @@ from app.config import settings
 from app.rag.vector_store import get_vector_store, similarity_search_with_relevance
 
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 jieba.initialize()  # 模块加载时预热，不要等到查询
 

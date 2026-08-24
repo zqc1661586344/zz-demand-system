@@ -1,16 +1,15 @@
 """RAG chain — query, retrieve, generate."""
 
-import logging
-
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
 
 from app.config import settings
+from app.logging_config import get_logger
 from app.rag.llms import get_llm
 from app.rag.vector_store import mmr_search, similarity_search_with_relevance
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 # RAG提示词模板
 RAG_PROMPT = ChatPromptTemplate.from_messages(

@@ -1,13 +1,12 @@
 """Auth helpers for Streamlit — auto-login and token management."""
 
-import logging
-
 import httpx
 import streamlit as st
 
+from app.logging_config import get_logger
 from app.streamlit_app.api_client import BASE_URL
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 def auto_login() -> bool:

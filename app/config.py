@@ -17,7 +17,13 @@ class Settings(BaseSettings):
     # App信息配置
     app_name: str = "Enterprise RAG System"
     app_debug: bool = True
-    log_level: str = "INFO"
+    log_level: str = "INFO"  # 日志级别（DEBUG/INFO/WARNING/ERROR），由 logging_config 读取
+    # 日志文件路径；为空字符串则只输出到标准流，不写文件
+    log_file: str = "./data/logs/app.log"
+    # 单个日志文件上限（字节），超过后按该大小轮转
+    log_max_bytes: int = 5 * 1024 * 1024  # 5MB
+    # 保留的轮转日志文件数量
+    log_backup_count: int = 5
 
     # Database配置，当前项目选择使用sqlite
     database_url: str = "sqlite:///./data/app.db"

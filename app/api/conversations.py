@@ -1,7 +1,6 @@
 """Conversation API routes — CRUD and RAG query."""
 
 import json
-import logging
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from fastapi.responses import StreamingResponse
@@ -9,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user
+from app.logging_config import get_logger
 from app.models.user import User
 from app.rag.chain import generate_summary, query_rag, query_rag_stream
 from app.schemas.conversation import (
@@ -33,6 +33,8 @@ RECENT_ROUNDS = 20
 SUMMARY_INTERVAL = RECENT_ROUNDS * 2  # 40 messages = every 20 rounds
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+
+logger = get_logger(__name__)
 
 
 def _build_history(conv, db, conv_id):
@@ -60,7 +62,6 @@ def _maybe_summarize(db, conv_id, total):
             new_summary = generate_summary(history_all)
             update_summary(db, conv_id, new_summary)
         except Exception as e:
-            logger = logging.getLogger(__name__)
             logger.warning("Failed to generate conversation summary: %s", e)
 
 
@@ -200,10 +201,11 @@ def _save_messages_background(conv_id: str, answer: str, sources: list, free_cha
     """
     db = SessionLocal()
     try:
-        add_message(db, conv_id, role="assistant", content=answer, sources=sources, free_chat=free_chat)
+        add_message(
+            db, conv_id, role="assistant", content=answer, sources=sources, free_chat=free_chat
+        )
         db.commit()
     except Exception as e:
-        logger = logging.getLogger(__name__)
         logger.warning("Failed to save streamed messages: %s", e)
         db.rollback()
     finally:
@@ -219,7 +221,7 @@ def query_conversation_stream(
     current_user: User = Depends(get_current_user),
 ):
     """流式RAG查询 — SSE标记流，然后是源数据+数据库保存。"""
-
+    logger.info("stream query begin...")
     conv = get_conversation_by_id(db, conv_id)
     if conv is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
@@ -259,7 +261,6 @@ def query_conversation_stream(
                     yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
                     yield "data: [DONE]\n\n"
         except Exception as e:
-            logger = logging.getLogger(__name__)
             logger.warning("Streaming RAG query failed: %s", e)
             yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
             yield "data: [DONE]\n\n"

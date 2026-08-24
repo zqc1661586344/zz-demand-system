@@ -9,6 +9,7 @@ build/
 # Runtime data
 data/chroma/
 data/uploads/
+data/logs/
 data/app.db
 *.db
 

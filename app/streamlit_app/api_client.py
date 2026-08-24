@@ -7,13 +7,14 @@ Single source of truth for BASE_URL — every frontend component reads from here
 """
 
 import json
-import logging
 from typing import Any
 
 import httpx
 import streamlit as st
 
-logger = logging.getLogger(__name__)
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
 
 BASE_URL = "http://localhost:8001"
 

@@ -1,6 +1,5 @@
 """Chroma vector store wrapper — single collection for all documents."""
 
-import logging
 from functools import lru_cache
 
 from langchain_chroma import Chroma
@@ -8,9 +7,10 @@ from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStoreRetriever
 
 from app.config import settings
+from app.logging_config import get_logger
 from app.rag.embeddings import get_embedding_model
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 @lru_cache
