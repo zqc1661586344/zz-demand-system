@@ -1,0 +1,51 @@
+"""Celery tasks — document processing (persistent, retryable)."""
+import logging
+
+from app.celery_app import celery_app
+from app.database import SessionLocal
+from app.models.document import Document
+from app.rag.pipeline import process_document as _process_document
+
+
+@celery_app.task(
+    bind=True,
+    max_retries=3,
+    default_retry_delay=30,
+    autoretry_for=(ConnectionError, TimeoutError, OSError),
+    acks_late=True,
+    reject_on_worker_lost=True,
+)
+def process_document_task(self, doc_id: str) -> dict:
+    """处理文档：加载→分块→向量化索引→更新状态。持久化任务，可重试。"""
+    logger = logging.getLogger(__name__)
+
+    # 检查文档是否存在、未被删除
+    db = SessionLocal()
+    try:
+        doc = db.query(Document).filter(Document.id == doc_id).first()
+        if doc is None:
+            logger.error("document %s not found, aborting task", doc_id)
+            return {"status": "skipped", "reason": "document_not_found"}
+        logger.info(
+            "processing document %s (%s) via celery task",
+            doc_id,
+            doc.original_filename,
+        )
+    finally:
+        db.close()
+
+    # 不可重试的异常（ValueError、FileNotFoundError）不重试
+    try:
+        _process_document(doc_id)
+        return {"status": "indexed", "doc_id": doc_id}
+    except (ValueError, FileNotFoundError) as exc:
+        logger.error("non-retryable error processing %s: %s", doc_id, exc)
+        # 标记为 failed，不重试
+        db = SessionLocal()
+        try:
+            from app.services.document_service import update_document_status
+
+            update_document_status(db, doc_id, "failed", error_message=str(exc))
+        finally:
+            db.close()
+        return {"status": "failed", "doc_id": doc_id, "error": str(exc)}

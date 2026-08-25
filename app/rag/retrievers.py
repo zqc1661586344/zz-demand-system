@@ -9,6 +9,7 @@ Usage:
 """
 
 import json
+import time
 import threading
 
 import jieba
@@ -28,9 +29,29 @@ jieba.initialize()
 # Per-user BM25 indexes (in-memory, rebuilt from DocumentChunk on changes)
 # ---------------------------------------------------------------------------
 _bm25_map: dict[str, "BM25Retriever | None"] = {}  # key: user_id or "__all__"
+_bm25_ts_map: dict[str, float] = {}  # Redis timestamp snapshot per key
 _bm25_lock = threading.Lock()
+_BM25_LRU_MAX = 500  # 进程内 LRU 缓存上限，防止内存无限增长
 # "加载中"标记：防止 TOCTOU 竞态下多个线程同时重建同一用户的 BM25 索引
 _LOADING: "BM25Retriever | None" = object()  # type: ignore[assignment]
+
+
+def _evict_lru() -> None:
+    """当 _bm25_map 达到上限时，淘汰一个旧条目。
+
+    策略：弹出第一个键（Python 3.7+ dict 保持插入顺序）。
+    不淘汰 _LOADING 条目，因为重建中的 key 应该完成。
+    """
+    with _bm25_lock:
+        while len(_bm25_map) >= _BM25_LRU_MAX:
+            for k in list(_bm25_map.keys()):
+                if _bm25_map[k] is not _LOADING:
+                    _bm25_map.pop(k, None)
+                    _bm25_ts_map.pop(k, None)
+                    break
+            else:
+                # 全是 _LOADING 条目——不应发生，但以防万一直接返回
+                break
 
 
 def _chinese_tokenizer(text: str) -> list[str]:
@@ -39,6 +60,35 @@ def _chinese_tokenizer(text: str) -> list[str]:
     BM25Retriever默认tokenizer只做lowercase + 按非字母数字字符 split，对中文会退化成单字（unigram）匹配，查准率低。用jieba后整个词语作为一个term参与BM25的IDF/词频计算，显著提升中文相关性。
     """
     return [t for t in jieba.lcut(text) if t.strip()]
+
+
+def _redis_ts_key(user_key: str) -> str:
+    """Redis key for BM25 rebuild timestamp."""
+    return f"bm25:ts:{user_key}"
+
+
+def _update_redis_ts(user_key: str) -> None:
+    """更新 Redis 中该用户的 BM25 时间戳（原子操作）。"""
+    from app.cache.redis_client import get_redis_client
+
+    r = get_redis_client()
+    if r is not None:
+        try:
+            r.setex(_redis_ts_key(user_key), settings.redis_bm25_cache_ttl_seconds, time.time())
+        except Exception:
+            logger.debug("Failed to update Redis BM25 ts for %s", user_key)
+
+
+def _invalidate_redis_ts(user_key: str) -> None:
+    """删除 Redis 中该用户的 BM25 时间戳，使其立即过期。"""
+    from app.cache.redis_client import get_redis_client
+
+    r = get_redis_client()
+    if r is not None:
+        try:
+            r.delete(_redis_ts_key(user_key))
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +122,7 @@ def refresh_bm25_for_user(user_id: str) -> None:
         metadatas = [json.loads(c.meta_json) if c.meta_json else {} for c in chunks]
 
         _rebuild_bm25_for_key(user_id, texts, metadatas)
+        _update_redis_ts(user_id)
     finally:
         db.close()
 
@@ -88,6 +139,7 @@ def refresh_bm25_all() -> None:
         metadatas = [json.loads(c.meta_json) if c.meta_json else {} for c in chunks]
 
         _rebuild_bm25_for_key("__all__", texts, metadatas)
+        _update_redis_ts("__all__")
     finally:
         db.close()
 
@@ -95,26 +147,32 @@ def refresh_bm25_all() -> None:
 def invalidate_other_users_bm25(except_user_id: str | None = None) -> None:
     """清空其他普通用户的BM25缓存 —— 共享文档变更时调用。
 
-    上传/删除共享文档后，除了上传者（已单独刷新）和__all__之外，其他用户的BM25索引仍包含旧数据，需要失效化，下次查询时通过get_bm25_for_user懒加载重建。
+    上传/删除共享文档后，除了上传者（已单独刷新）之外，其他用户的BM25索引以及superuser的全量索引（__all__）都需失效化，下次查询时通过get_bm25_for_user懒加载重建。
 
     Args:
         except_user_id: 保留的用户ID（通常是上传者，其BM25已单独刷新）
     """
     with _bm25_lock:
         for key in list(_bm25_map.keys()):
-            if key == "__all__":
-                continue
             if except_user_id is not None and key == except_user_id:
                 continue
             _bm25_map.pop(key, None)
+            _bm25_ts_map.pop(key, None)
+            _invalidate_redis_ts(key)
     logger.info(
-        "invalidated BM25 for other users (kept %s and __all__)",
+        "invalidated BM25 for other users (kept %s)",
         except_user_id or "none",
     )
 
 
 def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
     """懒加载获取用户的 BM25 索引（线程安全，sentinel 防重复重建）。
+
+    跨 worker 一致性模式：
+      - 如果 Redis 可用，比较本地 _bm25_ts_map 与 Redis 时间戳。
+        Redis 时间戳更新 → 本地缓存失效并重建。
+      - 如果 Redis 不可用，回退纯本地缓存模式（单进程正确）。
+      - 如果 rag_bm25_cache_bypass=True，每次都从 DB 重建（最慢但最正确）。
 
     Args:
         user_id: 用户ID。None 表示 superuser（使用 "__all__" 索引）。
@@ -123,17 +181,59 @@ def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
         BM25Retriever 实例，或 None（无数据/正在加载中）。
     """
     key = user_id if user_id is not None else "__all__"
-    with _bm25_lock:
-        if key in _bm25_map:
-            cached = _bm25_map[key]
+
+    # 多 worker 绕过模式：每次都从 DB 读取，不缓存（正确但较慢）
+    if settings.rag_bm25_cache_bypass:
+        if key == "__all__":
+            refresh_bm25_all()
+        else:
+            refresh_bm25_for_user(key)
+        with _bm25_lock:
+            cached = _bm25_map.get(key)
             return cached if cached is not _LOADING else None
-        # 标记为"加载中"，阻止其他线程重复重建
+
+    # ---- Redis 新鲜度检查 ----
+    redis_ts: float | None = None
+    if settings.celery_broker_url:
+        from app.cache.redis_client import get_redis_client
+
+        r = get_redis_client()
+        if r is not None:
+            try:
+                ts_str = r.get(_redis_ts_key(key))
+                if ts_str is not None:
+                    redis_ts = float(ts_str)
+            except Exception:
+                pass
+
+    with _bm25_lock:
+        if redis_ts is not None:
+            # Redis 模式下：比较本地快照与 Redis 时间戳
+            local_ts = _bm25_ts_map.get(key, 0.0)
+            if key in _bm25_map and _bm25_map[key] is not _LOADING and local_ts >= redis_ts:
+                return _bm25_map[key]
+        else:
+            # 无 Redis：纯本地缓存模式
+            if key in _bm25_map:
+                cached = _bm25_map[key]
+                return cached if cached is not _LOADING else None
+
+        # 缓存缺失 / 过期 → 标记为加载中（在锁内，防止竞态）
         _bm25_map[key] = _LOADING  # type: ignore[assignment]
-    # 在锁外执行 DB 重建（避免锁内 IO）
-    if key == "__all__":
-        refresh_bm25_all()
-    else:
-        refresh_bm25_for_user(key)
+
+    # ---- 锁外重建（避免锁内 IO） ----
+    try:
+        if key == "__all__":
+            refresh_bm25_all()
+        else:
+            refresh_bm25_for_user(key)
+    except Exception:
+        logger.warning("BM25 rebuild failed for %s", key, exc_info=True)
+        with _bm25_lock:
+            _bm25_map.pop(key, None)
+            _bm25_ts_map.pop(key, None)
+        return None
+
     with _bm25_lock:
         return _bm25_map.get(key)
 
@@ -145,8 +245,11 @@ def _rebuild_bm25_for_key(key: str, texts: list[str], metadatas: list[dict]) -> 
     with _bm25_lock:
         if not texts:
             _bm25_map[key] = None
+            _bm25_ts_map[key] = time.time()  # 记录空索引时间戳
             logger.info("BM25 for %s: empty (no chunks)", key)
             return
+
+        _evict_lru()  # 插入前触发 LRU 淘汰
 
         _bm25_map[key] = BM25Retriever.from_texts(
             texts,
@@ -154,6 +257,7 @@ def _rebuild_bm25_for_key(key: str, texts: list[str], metadatas: list[dict]) -> 
             k=settings.rag_rerank_top_n if settings.rag_rerank_enabled else 5,
             preprocess_func=_chinese_tokenizer,
         )
+        _bm25_ts_map[key] = time.time()  # 记录本地时间戳
         logger.info("BM25 for %s: built from %d chunks", key, len(texts))
 
 

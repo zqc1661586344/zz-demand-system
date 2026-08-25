@@ -4,12 +4,13 @@ import os
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.middleware.rate_limit import get_limiter
 from app.models.user import User
 from app.schemas.document import DocumentResponse, DocumentUploadResponse, ReprocessResponse
 from app.services.document_service import (
@@ -19,7 +20,6 @@ from app.services.document_service import (
     get_document_by_id,
     update_document_status,
 )
-from app.rag.pipeline import process_document
 
 from app.logging_config import get_logger
 
@@ -27,12 +27,17 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
+# 允许的文件扩展名（默认与 pipeline.py 支持的格式一致）
+# 允许的文件扩展名（默认与 pipeline.py 支持的格式一致，通过 ALLOWED_EXTENSIONS 环境变量覆盖）
+ALLOWED_EXTENSIONS = set(settings.allowed_extensions)
+
 
 @router.post("/upload", response_model=DocumentUploadResponse, status_code=201)
+@get_limiter().limit(settings.rate_limit_upload)
 async def upload_document(
+    request: Request,
     file: UploadFile = File(...),
     visibility: str = "private",
-    background_tasks: BackgroundTasks = BackgroundTasks(),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -65,13 +70,11 @@ async def upload_document(
     ext = mime_to_ext[mime_type]
 
     # 上传文档存盘
-    # TODO：考虑用异步任务处理文件上传和解析，避免阻塞主线程
     os.makedirs(settings.upload_path, exist_ok=True)
     stored_name = f"{uuid.uuid4().hex}{ext}"
     file_path = settings.upload_path / stored_name
     logger.info("file_path: %s", file_path)
 
-    # TODO: 检查文件大小，限制上传文件大小
     content = await file.read()
     with open(file_path, "wb") as f:
         f.write(content)
@@ -88,8 +91,19 @@ async def upload_document(
     )
     logger.info("document created in db, doc name: %s, doc id: %s", file.filename, doc.id)
 
-    # 触发异步处理管道，处理文档内容（向量化、BM25等）
-    background_tasks.add_task(process_document, doc.id)
+    # 通过 Celery 异步处理文档
+    if settings.celery_broker_url:
+        from app.rag.tasks import process_document_task
+
+        process_document_task.delay(doc.id)
+    else:
+        # 无 Celery 时回退 BackgroundTasks（开发模式）
+        from fastapi import BackgroundTasks
+
+        background_tasks = BackgroundTasks()
+        from app.rag.pipeline import process_document
+
+        background_tasks.add_task(process_document, doc.id)
 
     return DocumentUploadResponse(id=doc.id, filename=stored_name, status="pending")
 
@@ -135,7 +149,6 @@ def delete_document_route(
 @router.post("/{doc_id}/reprocess", response_model=ReprocessResponse)
 def reprocess_document(
     doc_id: str,
-    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -145,5 +158,13 @@ def reprocess_document(
     if doc.uploaded_by != current_user.id and not current_user.is_superuser:
         raise HTTPException(status_code=403, detail="Permission denied")
     doc = update_document_status(db, doc_id, "pending", error_message=None)
-    background_tasks.add_task(process_document, doc_id)
+    if settings.celery_broker_url:
+        from app.rag.tasks import process_document_task
+
+        process_document_task.delay(doc_id)
+    else:
+        from fastapi import BackgroundTasks
+        from app.rag.pipeline import process_document
+
+        BackgroundTasks().add_task(process_document, doc_id)
     return ReprocessResponse(id=doc_id, status="pending")

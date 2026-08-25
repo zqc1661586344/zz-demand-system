@@ -4,11 +4,14 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
 
 from app.api.router import api_router
+from app.config import settings
 from app.database import init_db, SessionLocal
 from app.logging_config import _configure_logging
+from app.middleware.tracing import TracingMiddleware
 from app.models.user import User, Role
 from app.services.auth_service import hash_password
 
@@ -39,11 +42,34 @@ def _seed_demo_user():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """应用程序生命周期：在启动时初始化日志记录和数据库。"""
+    """应用程序生命周期：在启动时初始化日志记录和数据库，并恢复卡住的文档。"""
     _configure_logging()
     init_db()
     _seed_demo_user()
+    # 恢复因异常退出而卡在 "processing" 状态的文档
+    _recover_stuck_documents()
     yield
+
+
+def _recover_stuck_documents() -> None:
+    """启动时将 status == 'processing' 的文档重置为 'pending'（可重新处理）。"""
+    from app.models.document import Document
+
+    db = SessionLocal()
+    try:
+        stuck = db.query(Document).filter(Document.status == "processing").all()
+        if stuck:
+            for doc in stuck:
+                doc.status = "pending"
+            db.commit()
+            import logging
+
+            logging.getLogger(__name__).warning(
+                "Reset %d stuck document(s) from 'processing' to 'pending'",
+                len(stuck),
+            )
+    finally:
+        db.close()
 
 
 app = FastAPI(
@@ -53,14 +79,29 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# CORS — allow all origins for development
+# CORS — allow all origins for development（生产环境用 CORS_ORIGINS 环境变量覆盖）
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=settings.cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Rate limiting
+if settings.rate_limit_enabled:
+    from slowapi import _rate_limit_exceeded_handler
+    from slowapi.middleware import SlowAPIMiddleware
+
+    from app.middleware.rate_limit import get_limiter
+
+    limiter = get_limiter()
+    app.state.limiter = limiter
+    app.add_exception_handler(429, _rate_limit_exceeded_handler)
+    app.add_middleware(SlowAPIMiddleware)
+
+# Request tracing（注入 request_id）
+app.add_middleware(TracingMiddleware)
 
 # Mount API routes
 app.include_router(api_router)
@@ -69,6 +110,45 @@ app.include_router(api_router)
 @app.get("/api/health")
 def health():
     return {"status": "ok", "version": "0.1.0"}
+
+
+@app.get("/api/health/live")
+def liveness():
+    """存活检查 — 仅返回服务是否在运行。"""
+    return {"status": "alive"}
+
+
+@app.get("/api/health/ready")
+def readiness():
+    """就绪检查 — 验证数据库、Chroma 等外部依赖是否可用。"""
+    from sqlalchemy import text
+
+    deps = {}
+    all_healthy = True
+
+    # 1. Database
+    try:
+        db = SessionLocal()
+        db.execute(text("SELECT 1"))
+        db.close()
+        deps["database"] = "ok"
+    except Exception as e:
+        deps["database"] = f"error: {e}"
+        all_healthy = False
+
+    # 2. Chroma（尝试打开 persistence 目录）
+    chroma_dir = settings.chroma_persist_path
+    if chroma_dir.exists():
+        deps["chroma"] = "ok"
+    else:
+        deps["chroma"] = "not_found"
+        all_healthy = False
+
+    status_code = 200 if all_healthy else 503
+    return JSONResponse(
+        status_code=status_code,
+        content={"status": "healthy" if all_healthy else "unhealthy", "dependencies": deps},
+    )
 
 
 @app.get("/")

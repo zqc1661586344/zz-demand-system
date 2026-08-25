@@ -11,11 +11,13 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import logging.handlers
 from pathlib import Path
 
 from app.config import settings
+from app.middleware.tracing import request_id_var
 
 
 def _configure_logging() -> None:
@@ -26,11 +28,18 @@ def _configure_logging() -> None:
     level = getattr(logging, settings.log_level.upper(), logging.INFO)
 
     # ---- Formatter ----
-    formatter = logging.Formatter(
-        # 追加 %(filename)s:%(lineno)d 定位日志来源（文件:行号），便于排查定位。
-        fmt="%(asctime)s  %(levelname)-8s  %(name)s  %(filename)s:%(lineno)d  %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
+    if settings.log_format == "json":
+        formatter = _JsonFormatter()
+    else:
+        formatter = logging.Formatter(
+            # 追加 %(filename)s:%(lineno)d 定位日志来源（文件:行号），便于排查定位。
+            fmt="%(asctime)s  %(levelname)-8s  %(name)s  %(filename)s:%(lineno)d  %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+
+    # ---- Filters ----
+    noisy_filter = _NoisyLoggerFilter()
+    request_id_filter = _RequestIDFilter()
 
     # ---- Handlers ----
     handlers: list[logging.Handler] = []
@@ -40,7 +49,8 @@ def _configure_logging() -> None:
     console_handler.setLevel(level)
     console_handler.setFormatter(formatter)
     # 挂噪声 Filter（见 _NoisyLoggerFilter 的注释说明为什么必须用 Filter）
-    console_handler.addFilter(_NoisyLoggerFilter())
+    console_handler.addFilter(noisy_filter)
+    console_handler.addFilter(request_id_filter)
     handlers.append(console_handler)
 
     # 2. Rotating file handler — only when log_file is configured
@@ -56,7 +66,8 @@ def _configure_logging() -> None:
         )
         file_handler.setLevel(level)
         file_handler.setFormatter(formatter)
-        file_handler.addFilter(_NoisyLoggerFilter())
+        file_handler.addFilter(noisy_filter)
+        file_handler.addFilter(request_id_filter)
         handlers.append(file_handler)
 
     # ---- Root logger ----
@@ -134,3 +145,34 @@ def get_logger(name: str) -> logging.Logger:
     if not getattr(_configure_logging, "_done", False):
         _configure_logging()
     return logging.getLogger(name)
+
+
+class _RequestIDFilter(logging.Filter):
+    """将当前请求的 request_id 注入每条日志记录的 record.request_id。"""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        try:
+            record.request_id = request_id_var.get() or "-"
+        except Exception:
+            record.request_id = "-"
+        return True
+
+
+class _JsonFormatter(logging.Formatter):
+    """结构化 JSON 日志格式化器，输出 request_id 等字段便于日志分析平台消费。"""
+
+    def format(self, record: logging.LogRecord) -> str:
+        # 确保 request_id 字段存在
+        record.request_id = getattr(record, "request_id", "-")
+        return json.dumps(
+            {
+                "asctime": self.formatTime(record, "%Y-%m-%d %H:%M:%S"),
+                "levelname": record.levelname,
+                "name": record.name,
+                "filename": record.filename,
+                "lineno": record.lineno,
+                "request_id": record.request_id,
+                "message": record.getMessage(),
+            },
+            ensure_ascii=False,
+        )

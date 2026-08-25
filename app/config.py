@@ -3,6 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -14,12 +15,17 @@ class Settings(BaseSettings):
         extra="ignore",  # 忽略额外的配置项
     )
 
+    # 运行环境：development / production
+    environment: Literal["development", "production"] = "development"
+
     # App信息配置
     app_name: str = "Enterprise RAG System"
     app_debug: bool = True
     log_level: str = "INFO"  # 日志级别（DEBUG/INFO/WARNING/ERROR），由 logging_config 读取
     # 日志文件路径；为空字符串则只输出到标准流，不写文件
     log_file: str = "./data/logs/app.log"
+    # 日志格式：json 或 plain（plain 为传统文本格式）
+    log_format: str = "plain"
     # 单个日志文件上限（字节），超过后按该大小轮转
     log_max_bytes: int = 5 * 1024 * 1024  # 5MB
     # 保留的轮转日志文件数量
@@ -27,6 +33,11 @@ class Settings(BaseSettings):
 
     # Database配置，当前项目选择使用sqlite
     database_url: str = "sqlite:///./data/app.db"
+    # PostgreSQL 连接池配置（仅 PostgreSQL 生效，SQLite 忽略）
+    db_pool_size: int = 20
+    db_max_overflow: int = 10
+    db_pool_pre_ping: bool = True
+    db_pool_recycle: int = 3600
 
     # JWT
     jwt_secret_key: str = "dev-secret-key-do-not-use-in-production-123456"
@@ -80,8 +91,32 @@ class Settings(BaseSettings):
     # Upload 文件上传存储路径配置
     upload_dir: str = "./data/uploads"
     max_upload_size_mb: int = 50
+    # 允许上传的文件扩展名（逗号分隔，与 pipeline.py 支持的格式保持一致）
+    allowed_extensions: list[str] = [".pdf", ".txt", ".md", ".docx"]
 
-    # Chunking 配置
+    # 多进程部署配置
+    web_concurrency: int = 4
+    # BM25 缓存绕过：多 worker 下每个进程独立缓存，设为 True 则每次从 DB 读取（正确但较慢）
+    rag_bm25_cache_bypass: bool = False
+
+    # Celery 异步任务队列配置（为空字符串时不启用 Celery，回退 BackgroundTasks）
+    celery_broker_url: str = ""
+    celery_result_backend: str = ""
+
+    # CORS（逗号分隔，生产环境必须覆盖；允许从 CORS_ORIGINS 环境变量读取）
+    cors_origins: list[str] = ["*"]
+
+    # 限流配置
+    rate_limit_enabled: bool = True
+    rate_limit_default: str = "30/minute"
+    rate_limit_llm_query: str = "10/minute"
+    rate_limit_login: str = "5/minute"
+    rate_limit_upload: str = "5/minute"
+
+    # Redis BM25 缓存时间戳 TTL（秒）：进程内 LRU 缓存通过 Redis 时间戳判断是否过期，
+    # 在 TTL 内且时间戳一致则直接用缓存，否则从 DB 重建。
+    # 仅当 celery_broker_url 配置了 Redis 时生效。
+    redis_bm25_cache_ttl_seconds: int = 300
     chunk_size: int = 800
     chunk_overlap: int = 150
 
@@ -122,6 +157,16 @@ class Settings(BaseSettings):
         """
         # 将天转换为秒（86400秒=1天）
         return self.jwt_refresh_token_expire_days * 86400
+
+    @model_validator(mode="after")
+    def validate_production(self):
+        """生产环境强制安全校验，防止默认值上线。"""
+        if self.environment == "production":
+            if self.jwt_secret_key == "dev-secret-key-do-not-use-in-production-123456":
+                raise ValueError("生产环境必须修改 JWT_SECRET_KEY，禁止使用默认值")
+            if self.cors_origins == ["*"]:
+                raise ValueError("生产环境 CORS 不允许通配符，请设置 CORS_ORIGINS")
+        return self
 
 
 settings = Settings()

@@ -56,6 +56,11 @@ def process_document(doc_id: str) -> None:
     2. 分成若干块
     3. 嵌入并索引到Chroma中
     4. 更新数据库状态
+
+    异常分类：
+      - ValueError（文件格式不支持）→ 不可重试，直接标记 failed
+      - FileNotFoundError（文件已被删除）→ 不可重试，直接标记 failed
+      - 其他异常 → 让上层 Celery 重试机制处理
     """
     db: Session = SessionLocal()
     try:
@@ -69,7 +74,16 @@ def process_document(doc_id: str) -> None:
 
         logger.info(f"the file name is: {doc.filename}, the file type is: {doc.mime_type}")
         # 按文件类型加载文档
-        raw_docs = load_document(doc.file_path, doc.mime_type)
+        try:
+            raw_docs = load_document(doc.file_path, doc.mime_type)
+        except ValueError as e:
+            logger.error(f"unsupported file type for doc {doc_id}: {e}")
+            update_document_status(db, doc_id, "failed", error_message=str(e))
+            return
+
+        # 检查文件是否存在
+        if not Path(doc.file_path).exists():
+            raise FileNotFoundError(f"File not found on disk: {doc.file_path}")
 
         # 添加元数据
         for d in raw_docs:
@@ -79,7 +93,6 @@ def process_document(doc_id: str) -> None:
             d.metadata["visibility"] = getattr(doc, "visibility", "private")
 
         # 切分chunks
-        # TODO：根据不同的文档类型选择不同的切分器，比如pdf引入ocr，不同的切分策略
         splitter = get_default_splitter()
         chunks = splitter.split_documents(raw_docs)
 
@@ -123,8 +136,12 @@ def process_document(doc_id: str) -> None:
         if getattr(doc, "visibility", "private") == "shared":
             invalidate_other_users_bm25(except_user_id=str(doc.uploaded_by))
 
+    except (FileNotFoundError, ValueError) as e:
+        logger.exception(f"document {doc_id}: non-retryable error")
+        update_document_status(db, doc_id, "failed", error_message=str(e))
     except Exception as e:
         logger.exception(f"document {doc_id} processing failed")
         update_document_status(db, doc_id, "failed", error_message=str(e))
+        raise  # 让 Celery 机制重试
     finally:
         db.close()

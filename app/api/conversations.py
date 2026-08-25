@@ -2,13 +2,15 @@
 
 import json
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user
 from app.logging_config import get_logger
+from app.middleware.rate_limit import get_limiter
 from app.models.user import User
 from app.rag.chain import generate_summary, query_rag, query_rag_stream
 from app.schemas.conversation import (
@@ -152,9 +154,11 @@ def list_messages(
 
 
 @router.post("/{conv_id}/query", response_model=QueryResponse)
+@get_limiter().limit(settings.rate_limit_llm_query)
 def query_conversation(
     conv_id: str,  # 对话ID，字符串类型
     req: QueryRequest,  # 查询请求对象，包含查询内容和相关参数
+    request: Request,  # 用于 slowapi 限流识别来源 IP
     db: Session = Depends(get_db),  # 数据库会话，依赖注入获取
     current_user: User = Depends(get_current_user),  # 当前用户，依赖注入获取
 ):
@@ -218,9 +222,11 @@ def _save_messages_background(conv_id: str, answer: str, sources: list, free_cha
 
 
 @router.post("/{conv_id}/query/stream")
+@get_limiter().limit(settings.rate_limit_llm_query)
 def query_conversation_stream(
     conv_id: str,
     req: QueryRequest,
+    request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -249,10 +255,13 @@ def query_conversation_stream(
 
     def event_stream():
         free_chat = False
-        # 同步保存用户消息（保证下一轮 _build_history 一定能读到）
-        # 避免 BackgroundTasks 与后续请求的竞态导致"无记忆"
-        add_message(db, conv_id, role="user", content=req.query)
-        db.commit()
+        # 使用独立 SessionLocal 保存用户消息，不持有 FastAPI 注入的 db session 跨流
+        local_db = SessionLocal()
+        try:
+            add_message(local_db, conv_id, role="user", content=req.query)
+            local_db.commit()
+        finally:
+            local_db.close()
         try:
             for event in query_rag_stream(
                 query=req.query, top_k=req.top_k, history=history, summary=summary, user_id=uid

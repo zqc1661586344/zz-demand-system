@@ -1,10 +1,12 @@
 """Auth API routes — register, login, refresh, me."""
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
+from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
+from app.middleware.rate_limit import get_limiter
 from app.models.user import User
 from app.schemas.auth import (
     ChangePasswordRequest,
@@ -46,7 +48,8 @@ def register(req: RegisterRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(req: LoginRequest, db: Session = Depends(get_db)):
+@get_limiter().limit(settings.rate_limit_login)
+def login(req: LoginRequest, request: Request, db: Session = Depends(get_db)):
     """进行身份验证并返回令牌。"""
     user = authenticate_user(db, req.username, req.password)
     if user is None:

@@ -41,7 +41,7 @@ flowchart TD
     DeleteChunk["DELETE document_chunks<br/>WHERE document_id = ?"]
     DeleteCommit["db.commit()<br/>（独立 DB 会话可见性）"]
     DeleteBM25["refresh_bm25_for_user(owner_id)<br/>从 DB 重建该用户的 BM25"]
-    DeleteShared["如果是共享文档 →<br/>清空 _bm25_map['__all__']<br/>（superuser 下次懒加载）"]
+    DeleteShared["如果是共享文档 →<br/>清空 _bm25_map['__all__']<br/>+ 失效其他非上传者用户的缓存<br/>（下次查询懒加载重建）"]
     DeleteFile["删除磁盘文件"]
     DeleteDB["删除数据库 records"]
 
@@ -566,8 +566,8 @@ flowchart LR
 删除或修改一份共享文档时：
 
 1. 触发 `refresh_bm25_for_user(owner_id)` → 文档所有者的 BM25 立即更新
-2. 清空 `_bm25_map["__all__"]` → superuser 下次查询时懒加载最新数据
-3. 其他普通用户：不需要立即操作，因为他们的 BM25 下次重建时会自动包含新的共享数据
+2. 触发 `invalidate_other_users_bm25(except_user_id=owner_id)` → 清空其他所有用户的 BM25 缓存（包括 superuser 的 `__all__` 全量索引），下次查询时懒加载重建
+3. 其他普通用户和 superuser 的下一查询自动触发 `get_bm25_for_user()` 从 DocumentChunk 表重建 BM25
 
 ---
 

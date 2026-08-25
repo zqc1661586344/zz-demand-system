@@ -26,10 +26,15 @@ dependencies = [
     "docx2txt>=0.9",
     "rank-bm25>=0.2.0",
     "jieba>=0.42.1",
+    "psycopg2-binary>=2.9.0",
+    "gunicorn>=22.0.0",
+    "celery>=5.4.0",
+    "redis>=5.0.0",
+    "slowapi>=0.1.9",
 ]
 
 [project.optional-dependencies]
-postgres = ["asyncpg>=0.30.0", "psycopg2-binary>=2.9.0"]
+postgres = ["asyncpg>=0.30.0"]
 ollama = ["langchain-ollama>=0.2.0"]
 langgraph = ["langgraph>=0.2.0"]
 # bge-reranker 交叉编码器重排所需（默认 RAG_RERANK_ENABLED=false，不强制安装，

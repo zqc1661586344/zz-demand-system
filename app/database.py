@@ -15,7 +15,18 @@ engine = create_engine(
     # echo 交由 logging_config 统一控制（_configure_logging 已将 sqlalchemy.* 设为 WARNING）
     # 避免 Engine 在每次执行 SQL 时重置 logger 级别覆盖我们的配置
     echo=False,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
+    # SQLite：check_same_thread=False 允许多线程读
+    # PostgreSQL：连接池配置
+    **(
+        {"connect_args": {"check_same_thread": False}}
+        if "sqlite" in settings.database_url
+        else {
+            "pool_size": settings.db_pool_size,
+            "max_overflow": settings.db_max_overflow,
+            "pool_pre_ping": settings.db_pool_pre_ping,
+            "pool_recycle": settings.db_pool_recycle,
+        }
+    ),
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

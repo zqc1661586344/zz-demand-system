@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 # 一键启动脚本：后端 (8001) + Streamlit 前端 (8002)
 # 使用：bash start.sh
+#
+# 开发模式默认启用限流（30 次/分钟）。高频调试时可临时关闭：
+#   RATE_LIMIT_ENABLED=false bash start.sh
+#
+# 需要 Celery + Redis 异步文档处理时，先启动 Redis 和 worker：
+#   redis-server
+#   celery -A app.celery_app worker --loglevel=info
+# 再运行本脚本（CELERY_BROKER_URL 默认空，回退 BackgroundTasks）：
 
 set -e
 
 cd "$(dirname "$0")"
 
 echo "=== 启动后端 (端口 8001) ==="
-uvicorn app.main:app --port 8001 &
+# 限流默认启用，不想受限可 export RATE_LIMIT_ENABLED=false
+RATE_LIMIT_ENABLED="${RATE_LIMIT_ENABLED:-true}" uvicorn app.main:app --port 8001 &
 BACKEND_PID=$!
 
 # 等待后端就绪
