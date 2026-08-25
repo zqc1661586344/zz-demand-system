@@ -20,7 +20,8 @@ from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
-jieba.initialize()  # 模块加载时预热，不要等到查询
+# 模块加载时预热，不要等到查询时才加载，否则第一次查询会非常慢
+jieba.initialize()
 
 
 # ---------------------------------------------------------------------------
@@ -33,11 +34,9 @@ _LOADING: "BM25Retriever | None" = object()  # type: ignore[assignment]
 
 
 def _chinese_tokenizer(text: str) -> list[str]:
-    """中英混合分词：对中文用 jieba 精确模式切词（词语级），英文按默认方式切分。
+    """中英混合分词：对中文用jieba精确模式切词（词语级），英文按默认方式切分。
 
-    BM25Retriever 默认 tokenizer 只做 lowercase + 按非字母数字字符 split，
-    对中文会退化成单字（unigram）匹配，查准率低。用 jieba 后整个词语作为一个
-    term 参与 BM25 的 IDF / 词频计算，显著提升中文相关性。
+    BM25Retriever默认tokenizer只做lowercase + 按非字母数字字符 split，对中文会退化成单字（unigram）匹配，查准率低。用jieba后整个词语作为一个term参与BM25的IDF/词频计算，显著提升中文相关性。
     """
     return [t for t in jieba.lcut(text) if t.strip()]
 
@@ -78,7 +77,7 @@ def refresh_bm25_for_user(user_id: str) -> None:
 
 
 def refresh_bm25_all() -> None:
-    """从 document_chunks 读取全部文档，重建全量 BM25（供 superuser "__all__" 使用）。"""
+    """从document_chunks读取全部文档，重建全量 BM25（供 superuser "__all__" 使用）。"""
     from app.database import SessionLocal
     from app.models.document import DocumentChunk
 
@@ -94,14 +93,12 @@ def refresh_bm25_all() -> None:
 
 
 def invalidate_other_users_bm25(except_user_id: str | None = None) -> None:
-    """清空其他普通用户的 BM25 缓存 —— 共享文档变更时调用。
+    """清空其他普通用户的BM25缓存 —— 共享文档变更时调用。
 
-    上传/删除共享文档后，除了上传者（已单独刷新）和 __all__ 之外，
-    其他用户的 BM25 索引仍包含旧数据，需要失效化，下次查询时通过
-    get_bm25_for_user 懒加载重建。
+    上传/删除共享文档后，除了上传者（已单独刷新）和__all__之外，其他用户的BM25索引仍包含旧数据，需要失效化，下次查询时通过get_bm25_for_user懒加载重建。
 
     Args:
-        except_user_id: 保留的用户 ID（通常是上传者，其 BM25 已单独刷新）
+        except_user_id: 保留的用户ID（通常是上传者，其BM25已单独刷新）
     """
     with _bm25_lock:
         for key in list(_bm25_map.keys()):
@@ -111,7 +108,7 @@ def invalidate_other_users_bm25(except_user_id: str | None = None) -> None:
                 continue
             _bm25_map.pop(key, None)
     logger.info(
-        "Invalidated BM25 for other users (kept %s and __all__)",
+        "invalidated BM25 for other users (kept %s and __all__)",
         except_user_id or "none",
     )
 
@@ -200,21 +197,30 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
         top1, spread = scored[0][1], (scored[0][1] - scored[1][1] if len(scored) >= 2 else 1.0)
         if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
             logger.info(
-                "Dense-only top-1=%.3f spread=%.3f (min=%.3f/%.3f) → free chat",
-                top1, spread, settings.rag_min_score, settings.rag_hybrid_min_spread,
+                "dense-only top-1=%.3f spread=%.3f (min=%.3f/%.3f) → free chat",
+                top1,
+                spread,
+                settings.rag_min_score,
+                settings.rag_hybrid_min_spread,
             )
             return []
         vs = get_vector_store()
-        return vs.as_retriever(search_kwargs={
-            "k": top_k, "filter": _user_where(user_id),
-        }).invoke(query)[:top_k]
+        return vs.as_retriever(
+            search_kwargs={
+                "k": top_k,
+                "filter": _user_where(user_id),
+            }
+        ).invoke(query)[:top_k]
 
     # 2. BM25 有命中 → 无需 spread，直接 ensemble
     sparse.k = top_k
     vs = get_vector_store()
-    dense_retriever = vs.as_retriever(search_kwargs={
-        "k": top_k, "filter": _user_where(user_id),
-    })
+    dense_retriever = vs.as_retriever(
+        search_kwargs={
+            "k": top_k,
+            "filter": _user_where(user_id),
+        }
+    )
 
     from langchain_classic.retrievers import EnsembleRetriever
 
@@ -225,14 +231,12 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
         c=60,
     ).invoke(query)
 
-    # 【相关性门控】ensemble 可能因 BM25 的关键词命中而返回文档，
-    # 但余弦分数仍可能很低（无关查询）。用 k=1 的 cosine 分数做最终把关，
-    # 低于 rag_min_score → free chat。只多一次轻量查询，不做 spread。
+    # 【相关性门控】ensemble可能因BM25的关键词命中而返回文档，但余弦分数仍可能很低（无关查询）。用k=1的 cosine 分数做最终把关，低于rag_min_score → free chat，只多一次轻量查询，不做 spread。
     if docs:
         scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
         if not scored or scored[0][1] < settings.rag_min_score:
             logger.info(
-                "Hybrid BM25 path but cosine top-1=%.3f below min_score=%.3f → free chat",
+                "hybrid BM25 path but cosine top-1=%.3f below min_score=%.3f → free chat",
                 scored[0][1] if scored else 0,
                 settings.rag_min_score,
             )
@@ -246,7 +250,10 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
 # Optional cross-encoder reranker
 # ---------------------------------------------------------------------------
 def _maybe_rerank(query: str, docs: list[Document]) -> list[Document] | None:
-    """如果重新排序器已启用且依赖关系可用，则对文档进行重新排序。返回重新排序后的前N个文档，或者当重新排序器被禁用或不可用时返回 None。"""
+    """如果重新排序器已启用且依赖关系可用，则对文档进行重新排序。
+
+    返回重新排序后的前N个文档，或者当重新排序器被禁用或不可用时返回 None。
+    """
     if not settings.rag_rerank_enabled:
         return None
 
@@ -294,16 +301,16 @@ def _build_reranker():
             model = HuggingFaceCrossEncoder(model_name=settings.rag_rerank_model)
             _built_reranker = CrossEncoderReranker(model=model, top_n=settings.rag_rerank_top_n)
             logger.info(
-                "Reranker loaded: %s (top_n=%s)",
+                "reranker loaded: %s (top_n=%s)",
                 settings.rag_rerank_model,
                 settings.rag_rerank_top_n,
             )
             return _built_reranker
         except ImportError:
-            logger.warning("transformers / torch not installed — reranker unavailable")
+            logger.warning("transformers/torch not installed — reranker unavailable")
             _built_reranker = False  # sentinel: don't retry every call
             return None
         except Exception as exc:
-            logger.warning("Failed to load reranker model: %s", exc)
+            logger.warning("failed to load reranker model: %s", exc)
             _built_reranker = False
             return None

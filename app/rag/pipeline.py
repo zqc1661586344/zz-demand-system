@@ -124,7 +124,7 @@ def process_document(doc_id: str) -> None:
             invalidate_other_users_bm25(except_user_id=str(doc.uploaded_by))
 
     except Exception as e:
-        logger.exception(f"Document {doc_id} processing failed")
+        logger.exception(f"document {doc_id} processing failed")
         update_document_status(db, doc_id, "failed", error_message=str(e))
     finally:
         db.close()

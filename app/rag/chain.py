@@ -123,9 +123,12 @@ def _build_free_chat_chain():
 
 
 def _retrieve_relevant_docs(query: str, top_k: int, user_id: str | None = None) -> list:
-    """按配置的检索算法取回文档，并用相关性阈值过滤掉不相关的结果。返回的列表为空表示"文档中没有相关内容"，调用方应回退到自由聊天。"""
+    """按配置的检索算法取回文档，并用相关性阈值过滤掉不相关的结果。
 
-    # 混合检索（spread 判定已在 hybrid_search 内部完成，无需再重复查 Chroma）
+    返回的列表为空表示"文档中没有相关内容"，调用方应回退到自由聊天。
+    """
+
+    # 混合检索（spread判定已在hybrid_search内部完成，无需再重复查 Chroma）
     if settings.rag_search_type == "hybrid":
         logger.info("rag search type is hybrid")
 
@@ -133,7 +136,7 @@ def _retrieve_relevant_docs(query: str, top_k: int, user_id: str | None = None) 
 
         return hybrid_search(query, top_k=top_k, user_id=user_id)
 
-    # 最大边际相关性——先查再按 cosine 分数阈值过滤，不够的走 free chat
+    # 最大边际相关性——先查再按cosine分数阈值过滤，不够的走 free chat
     elif settings.rag_search_type == "mmr":
         logger.info("rag search type is mmr")
         docs = mmr_search(query, k=top_k, user_id=user_id)
