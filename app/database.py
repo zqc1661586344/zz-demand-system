@@ -10,8 +10,9 @@ class Base(DeclarativeBase):
     pass
 
 
+_db_url = settings.database_url or "sqlite:///./data/app.db"
 engine = create_engine(
-    settings.database_url,
+    _db_url,
     # echo 交由 logging_config 统一控制（_configure_logging 已将 sqlalchemy.* 设为 WARNING）
     # 避免 Engine 在每次执行 SQL 时重置 logger 级别覆盖我们的配置
     echo=False,
@@ -19,7 +20,7 @@ engine = create_engine(
     # PostgreSQL：连接池配置
     **(
         {"connect_args": {"check_same_thread": False}}
-        if "sqlite" in settings.database_url
+        if "sqlite" in _db_url
         else {
             "pool_size": settings.db_pool_size,
             "max_overflow": settings.db_max_overflow,

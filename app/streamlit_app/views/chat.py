@@ -138,6 +138,8 @@ def page():
                     headers={"Authorization": f"Bearer {access_token}"},
                 ) as resp:
                     if resp.status_code >= 400:
+                        # httpx 流式模式下必须先 read() 才能访问响应体
+                        resp.read()
                         try:
                             detail = resp.json().get("detail", resp.text)
                         except Exception:

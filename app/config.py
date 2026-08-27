@@ -31,8 +31,8 @@ class Settings(BaseSettings):
     # 保留的轮转日志文件数量
     log_backup_count: int = 5
 
-    # Database配置，当前项目选择使用sqlite
-    database_url: str = "sqlite:///./data/app.db"
+    # Database配置；留空时回退 SQLite（开发环境），生产必须设 PG 连接串
+    database_url: str = ""
     # PostgreSQL 连接池配置（仅 PostgreSQL 生效，SQLite 忽略）
     db_pool_size: int = 20
     db_max_overflow: int = 10
@@ -65,10 +65,6 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"
     embedding_timeout_seconds: int = 30
     embedding_max_retries: int = 3
-
-    # # Chroma 向量数据库配置
-    # chroma_collection_name: str = "documents"
-    # chroma_persist_dir: str = "./data/chroma"
 
     # PGVector 向量库连接串（psycopg3 格式，替代 Chroma）。留空则无法使用向量库。
     vector_store_url: str = ""
@@ -129,15 +125,6 @@ class Settings(BaseSettings):
     redis_bm25_cache_ttl_seconds: int = 300
     chunk_size: int = 800
     chunk_overlap: int = 150
-
-    # @property
-    # def chroma_persist_path(self) -> Path:
-    #     """获取Chroma持久化存储路径的方法
-
-    #     返回:
-    #         Path: Chroma数据库持久化存储的路径对象，该路径指向chroma_persist_dir属性指定的目录
-    #     """
-    #     return Path(self.chroma_persist_dir)  # 将chroma_persist_dir转换为Path对象并返回
 
     @property
     def upload_path(self) -> Path:
