@@ -154,7 +154,7 @@ def _retrieve_relevant_docs(
     # 多轮对话：先改写为独立查询，再用于检索
     query = _rewrite_query(query, history)
 
-    # 混合检索（spread判定已在hybrid_search内部完成，无需再重复查 Chroma）
+    # 混合检索（spread判定已在hybrid_search内部完成，无需再重复查 PGVector）
     if settings.rag_search_type == "hybrid":
         logger.info("rag search type is hybrid")
 
@@ -186,7 +186,7 @@ def _retrieve_relevant_docs(
     else:
         scored = similarity_search_with_relevance(query, k=top_k, user_id=user_id)
         logger.info(
-            "rag serach type is chroma, query=%r scores=%s threshold=%s → retained document count=%d",
+            "rag serach type is PGVector, query=%r scores=%s threshold=%s → retained document count=%d",
             query[:50],
             [round(s, 3) for _, s in scored],
             settings.rag_min_score,

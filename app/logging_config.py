@@ -91,10 +91,6 @@ _NOISY_NAMES_FILTER: frozenset[str] = frozenset(
         "httpx",
         "httpcore",
         "urllib3",
-        # Chroma 内部组件（telemetry 已在 vector_store.py 关闭，其余组件也一并静音）
-        "chromadb",
-        "chromadb.telemetry.product.posthog",
-        "chromadb.segment.impl.metadata",
         # SQLAlchemy — engine 层面的 SQL 明细已靠 echo=False 解决，这里兜底
         "sqlalchemy",
         "sqlalchemy.engine",

@@ -122,7 +122,7 @@ def liveness():
 
 @app.get("/api/health/ready")
 def readiness():
-    """就绪检查 — 验证数据库、Chroma 等外部依赖是否可用。"""
+    """就绪检查 — pgvector 等外部依赖是否可用。"""
     from sqlalchemy import text
 
     deps = {}
@@ -138,12 +138,15 @@ def readiness():
         deps["database"] = f"error: {e}"
         all_healthy = False
 
-    # 2. Chroma（尝试打开 persistence 目录）
-    chroma_dir = settings.chroma_persist_path
-    if chroma_dir.exists():
-        deps["chroma"] = "ok"
-    else:
-        deps["chroma"] = "not_found"
+    # 2. PGVector 向量库
+    try:
+        from app.rag.vector_store import _maintenance_engine
+
+        with _maintenance_engine().connect() as conn:
+            conn.execute(text("SELECT 1"))
+        deps["vector_store"] = "ok"
+    except Exception as e:
+        deps["vector_store"] = f"error: {e}"
         all_healthy = False
 
     status_code = 200 if all_healthy else 503

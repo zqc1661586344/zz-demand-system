@@ -53,7 +53,7 @@ def delete_document(db: Session, doc_id: str) -> bool:
     owner_id = str(doc.uploaded_by)
     visibility = doc.visibility
 
-    # Remove from vector store first (Chroma — by document_id metadata)
+    # Remove from vector store first (PGVector — by document_id metadata)
     delete_documents_from_store(doc_id)
 
     # 删除 DocumentChunk 表中的记录（使用传入的 db 会话）

@@ -27,7 +27,7 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
-# 允许的文件扩展名（默认与 pipeline.py 支持的格式一致）
+
 # 允许的文件扩展名（默认与 pipeline.py 支持的格式一致，通过 ALLOWED_EXTENSIONS 环境变量覆盖）
 ALLOWED_EXTENSIONS = set(settings.allowed_extensions)
 
@@ -74,7 +74,7 @@ async def upload_document(
     os.makedirs(settings.upload_path, exist_ok=True)
     stored_name = f"{uuid.uuid4().hex}{ext}"
     file_path = settings.upload_path / stored_name
-    logger.info("file_path: %s", file_path)
+    logger.info(f"file_path: {file_path}")
 
     content = await file.read()
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
@@ -83,6 +83,7 @@ async def upload_document(
             status_code=413,
             detail=f"文件超过 {settings.max_upload_size_mb}MB 大小限制",
         )
+
     with open(file_path, "wb") as f:
         f.write(content)
 
@@ -98,15 +99,17 @@ async def upload_document(
     )
     logger.info("document created in db, doc name: %s, doc id: %s", file.filename, doc.id)
 
-    # 通过 Celery 异步处理文档
-    if settings.celery_broker_url:
+    # 通过 Celery 异步处理文档（生产环境）
+    if settings.celery_broker_url and settings.use_celery_task:
         from app.rag.tasks import process_document_task
 
+        logger.info("process document task use celery")
         process_document_task.delay(doc.id)
     else:
         # 无 Celery 时回退 BackgroundTasks（开发模式）—— 使用 FastAPI 注入的实例
         from app.rag.pipeline import process_document
 
+        logger.info("process document task use background_tasks")
         background_tasks.add_task(process_document, doc.id)
 
     return DocumentUploadResponse(id=doc.id, filename=stored_name, status="pending")
@@ -133,9 +136,13 @@ def get_document(
 ):
     doc = get_document_by_id(db, doc_id)
     if doc is None:
+        logger.error("document not found: %s", doc_id)
         raise HTTPException(status_code=404, detail="Document not found")
+
     if doc.uploaded_by != current_user.id and not current_user.is_superuser:
+        logger.error("permission denied: %s", doc_id)
         raise HTTPException(status_code=403, detail="Permission denied")
+
     return doc
 
 
@@ -147,10 +154,15 @@ def delete_document_route(
 ):
     doc = get_document_by_id(db, doc_id)
     if doc is None:
+        logger.error("document not found: %s", doc_id)
         raise HTTPException(status_code=404, detail="Document not found")
+
     if doc.uploaded_by != current_user.id and not current_user.is_superuser:
+        logger.error("permission denied: %s", doc_id)
         raise HTTPException(status_code=403, detail="Permission denied")
+
     if not delete_document(db, doc_id):
+        logger.error("failed to delete document: %s", doc_id)
         raise HTTPException(status_code=500, detail="Failed to delete document")
     return {"message": "Document deleted successfully"}
 
@@ -164,16 +176,23 @@ def reprocess_document(
 ):
     doc = get_document_by_id(db, doc_id)
     if doc is None:
+        logger.error("document not found: %s", doc_id)
         raise HTTPException(status_code=404, detail="Document not found")
+
     if doc.uploaded_by != current_user.id and not current_user.is_superuser:
+        logger.error("permission denied: %s", doc_id)
         raise HTTPException(status_code=403, detail="Permission denied")
+
     doc = update_document_status(db, doc_id, "pending", error_message=None)
-    if settings.celery_broker_url:
+    if settings.celery_broker_url and settings.use_celery_task:
         from app.rag.tasks import process_document_task
 
+        logger.info("reprocess document task use celery")
         process_document_task.delay(doc_id)
     else:
         from app.rag.pipeline import process_document
+
+        logger.info("reprocess document task use background_tasks")
 
         background_tasks.add_task(process_document, doc_id)
     return ReprocessResponse(id=doc_id, status="pending")

@@ -7,6 +7,11 @@ from langchain_core.messages import AIMessage
 
 from app.config import settings
 
+from app.logging_config import get_logger
+
+
+logger = get_logger(__name__)
+
 
 def _fake_llm_invoke(input) -> AIMessage:
     """从LangChain输入中提取用户提示，并返回一个模拟答案。"""
@@ -43,10 +48,13 @@ def get_llm():
     provider = settings.llm_provider
 
     if provider == "local" or provider == "test":
+        logger.info("use fake model")
         return _fake_llm_runnable
 
     # TODO: 后续加上其他模型适配
     if provider == "openai":
+        logger.info("use a model compliant with the OpenAI protocol")
+
         from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(
@@ -59,6 +67,7 @@ def get_llm():
         )
 
     elif provider == "ollama":
+        logger.info(f"use local ollama model: {settings.ollama_model} ")
         from langchain_community.chat_models import ChatOllama
 
         return ChatOllama(
@@ -68,4 +77,5 @@ def get_llm():
         )
 
     else:
+        logger.error(f"unsupported llm provider: {provider}")
         raise ValueError(f"Unsupported LLM provider: {provider}")

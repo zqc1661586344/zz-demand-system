@@ -54,7 +54,7 @@ def process_document(doc_id: str) -> None:
 
     1. 从磁盘加载
     2. 分成若干块
-    3. 嵌入并索引到Chroma中
+    3. 嵌入并索引到PGVector中
     4. 更新数据库状态
 
     异常分类：
@@ -108,7 +108,7 @@ def process_document(doc_id: str) -> None:
             logger.warning(f"document {doc_id}: empty after splitting, marked failed")
             return
 
-        # 清理该文档在 Chroma 中的旧向量（防止重复处理时累积孤儿条目）
+        # 清理该文档在 PGVector 中的旧向量（防止重复处理时累积孤儿条目）
         delete_documents_from_store(str(doc.id))
 
         # 清理该文档在 DocumentChunk 表中的旧记录（防止重复处理累积孤儿行）

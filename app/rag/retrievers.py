@@ -1,4 +1,4 @@
-"""混合检索器——BM25稀疏+Chroma密集+RRF融合+可选交叉编码器重新排序。
+"""混合检索器——BM25稀疏+PGVector密集+RRF融合+可选交叉编码器重新排序。
 
 核心设计：每个用户拥有独立的 BM25 索引（含私有文档 + 全部共享文档），
 superuser 使用 "__all__" 键的全量索引。
@@ -277,19 +277,10 @@ def _rebuild_bm25_for_key(key: str, texts: list[str], metadatas: list[dict]) -> 
 
 
 # ---------------------------------------------------------------------------
-# Backward-compatible alias for existing callers (e.g. tests)
-# ---------------------------------------------------------------------------
-def refresh_bm25_index_from_chroma() -> None:
-    """（已废弃）向后兼容别名。新代码请直接调用 refresh_bm25_for_user。"""
-    logger.warning("refresh_bm25_index_from_chroma() is deprecated, use refresh_bm25_for_user()")
-    refresh_bm25_all()
-
-
-# ---------------------------------------------------------------------------
-# Hybrid search — Chroma dense + BM25 sparse → Ensemble (RRF fusion)
+# Hybrid search — PGVector dense + BM25 sparse → Ensemble (RRF fusion)
 # ---------------------------------------------------------------------------
 def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Document]:
-    """混合检索：Chroma稠密 + BM25稀疏 → RRF融合（通过EnsembleRetriever）。
+    """混合检索：PGVector稠密 + BM25稀疏 → RRF融合（通过EnsembleRetriever）。
 
     【相关性判定策略】
       - BM25 有数据 → 跳过 cosine spread 检查（关键词命中本身已说明相关）

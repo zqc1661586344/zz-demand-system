@@ -122,7 +122,7 @@ bash start.sh
 | `OLLAMA_BASE_URL` | Ollama 时必填 | `http://localhost:11434` | Ollama 服务地址 |
 | `OLLAMA_MODEL` | 否 | `qwen2.5:7b` | Ollama 使用的 LLM 模型 |
 | `OLLAMA_EMBEDDING_MODEL` | 否 | `BAAI/bge-m3` | Ollama 使用的 Embedding 模型 |
-| `CHROMA_PERSIST_DIR` | 否 | `./data/chroma` | 向量数据库持久化路径 |
+| `VECTOR_STORE_URL` | 否 | ` ` | PGVector数据库 |
 | `CHUNK_SIZE` | 否 | `800` | 文本分块大小（字符数） |
 | `CHUNK_OVERLAP` | 否 | `150` | 分块重叠（字符数） |
 | `MAX_UPLOAD_SIZE_MB` | 否 | `50` | 单文件最大上传大小 |
@@ -180,7 +180,7 @@ flowchart LR
 flowchart TD
     Q["用户提问"] --> H["组装对话历史（最近 5 轮 + 更早摘要）"]
     H --> D{"检索模式 RAG_SEARCH_TYPE"}
-    D -->|hybrid| DH["Chroma 稠密检索<br/>bge-m3 cosine"]
+    D -->|hybrid| DH["PGVector 稠密检索<br/>bge-m3 cosine"]
     D -->|hybrid| SH["BM25 稀疏检索<br/>jieba 分词"]
     DH --> F["RRF 融合"]
     SH --> F
@@ -200,7 +200,7 @@ flowchart TD
 **核心设计要点**：
 - **三种检索模式**：`hybrid`（默认）/ `similarity` / `mmr`，通过 `RAG_SEARCH_TYPE` 切换。
 - **无命中回退**：hybrid 用「绝对分数 + 分数离散度」双判据；三者检索为空或判定不相关时，回退到`自由聊天`（前缀标注 *「当前已有文档中找不到答案…」*，不附带来源）。
-- **文档生命周期**：上传/删除后自动从 Chroma 全量重建 BM25 内存索引，保证关键词检索与向量索引一致。
+- **文档生命周期**：上传/删除后自动从 PGVector 全量重建 BM25 内存索引，保证关键词检索与向量索引一致。
 
 > 📄 **详细流程**：完整的多路检索结构、RRF 融合公式、重排器配置、FAQ 见 [`docs/RAG.md`](docs/RAG.md)；端到端架构见 [`docs/architecture.md`](docs/architecture.md)。
 
@@ -430,7 +430,7 @@ docs/               # 详细架构文档
 | **UI 框架** | Streamlit 1.40+ |
 | **ORM** | SQLAlchemy 2.0+ |
 | **数据库迁移** | Alembic |
-| **向量数据库** | Chroma（bge-m3 1024d cosine） |
+| **向量数据库** | PGVector（bge-m3 1024d cosine） |
 | **RAG 框架** | LangChain 1.3+ |
 | **混合检索** | rank_bm25（关键词检索）+ jieba（中文分词） |
 | **重排器** | BAAI/bge-reranker-v2-m3（可选，需 transformers + torch） |

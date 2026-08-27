@@ -1,75 +1,118 @@
-"""Chroma vector store wrapper — single collection for all documents."""
+"""PGVector vector store wrapper — 单 collection 承载全部文档（pgvector 替代 Chroma）。
+
+对外接口与 Chroma 版保持一致，调用方（pipeline / retrievers / chain / document_service）
+无需改动：get_vector_store / add_documents_to_store / delete_documents_from_store /
+get_retriever / similarity_search / mmr_search / similarity_search_with_relevance / _user_where。
+"""
 
 from functools import lru_cache
-
-from chromadb.config import Settings as ChromaSettings
-from langchain_chroma import Chroma
+from sqlalchemy import create_engine, text
 from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStoreRetriever
-
+from langchain_postgres.vectorstores import DistanceStrategy, PGVector
 from app.config import settings
 from app.logging_config import get_logger
 from app.rag.embeddings import get_embedding_model
 
 logger = get_logger(__name__)
 
+# bge-m3 向量维度（PGVector 必须固定维度，否则 embedding 列无固定长度、无法建 HNSW 索引）
+EMBEDDING_DIM = 1024
+
+# HNSW 索引是否已确保创建（模块级标志，避免每次 add_documents 都执行 CREATE INDEX）
+_hnsw_index_ensured = False
+
 
 def _user_where(user_id: str | None) -> dict | None:
-    """构建用户级Chroma过滤条件。
-
-    普通用户只能看到自己的私有文档 + 所有共享文档；superuser（user_id=None）不设过滤，全量可见。
-
-    Args:
-        user_id: 用户ID。None 表示 superuser，不设过滤。
-
-    Returns:
-        Chroma where filter dict，或 None（不过滤）。
-    """
+    """构建用户级过滤条件：普通用户只能看到自己的私有文档 + 所有共享文档；superuser 不过滤。"""
     if user_id is None:
         return None
     return {"$or": [{"uploaded_by": {"$eq": user_id}}, {"visibility": {"$eq": "shared"}}]}
 
 
 @lru_cache
-def get_vector_store() -> Chroma:
-    """返回Chroma向量存储实例。
+def _maintenance_engine():
+    """维护用 SQLAlchemy engine（psycopg3），用于按 metadata 删除向量与建 HNSW 索引。"""
+    return create_engine(
+        settings.vector_store_url,
+        pool_size=settings.db_pool_size,
+        max_overflow=settings.db_max_overflow,
+        pool_pre_ping=settings.db_pool_pre_ping,
+        pool_recycle=settings.db_pool_recycle,
+    )
 
-    这里显式关闭 Chroma 匿名遥测（anonymized_telemetry=False）：
-    Chroma 默认会上报 telemetry，其内部用 posthog SDK 发 HTTP（httpx）请求，既产生噪音日志（httpx POST api.edgefn.net），又可能因 SDK 版本不兼容抛错并被 chromadb.telemetry.product.posthog 打印 ERROR（capture() takes 1 positional argument...）。从源头关掉整条链路最干净，也无需为每个组件单独降噪。
+
+def _ensure_hnsw_index() -> None:
+    """幂等地为 embedding 建 HNSW（cosine）索引；无索引时向量检索退化为全表扫描。
+    使用模块级标志避免每次 add_documents 都执行 CREATE INDEX。
     """
-    return Chroma(
-        collection_name=settings.chroma_collection_name,
-        embedding_function=get_embedding_model(),
-        persist_directory=str(settings.chroma_persist_path),
-        # 关闭匿名遥测，从源头消除 posthog/httpx 噪音
-        client_settings=ChromaSettings(anonymized_telemetry=False),
-        # 固定用余弦度量（cosine）+ 显式 cosine relevance 换算函数，使 relevance_score 语义统一为 1 - cosine_distance（越高越相关），且不依赖从索引遗留配置解析度量（可避开 _select_relevance_score_fn 抛错）。【注意】该度量只在"创建新 collection"时生效——旧索引需删除重建：rm -rf data/chroma
-        collection_metadata={"hnsw:space": "cosine"},
-        relevance_score_fn=lambda distance: 1.0 - distance,
+    global _hnsw_index_ensured
+    if _hnsw_index_ensured:
+        return
+    try:
+        with _maintenance_engine().begin() as conn:
+            conn.execute(
+                text(
+                    "CREATE INDEX IF NOT EXISTS idx_documents_hnsw "
+                    "ON langchain_pg_embedding USING hnsw (embedding vector_cosine_ops)"
+                )
+            )
+            logger.info("HNSW index ensured on langchain_pg_embedding")
+            _hnsw_index_ensured = True
+    except Exception as e:  # noqa: BLE001 — 索引缺失只影响性能，不应阻断写入
+        logger.warning("failed to ensure HNSW index: %s", e)
+
+
+@lru_cache
+def get_vector_store() -> PGVector:
+    """返回 pgvector 向量库实例（单例，lru_cache 缓存，跨请求复用）。"""
+    return PGVector(
+        embeddings=get_embedding_model(),
+        collection_name=settings.vector_collection_name,
+        connection=settings.vector_store_url,
+        embedding_length=EMBEDDING_DIM,
+        distance_strategy=DistanceStrategy.COSINE,
+        use_jsonb=True,
+        create_extension=True,
     )
 
 
 def add_documents_to_store(docs: list[Document]) -> list[str]:
-    """向Chroma collection中添加文档。"""
+    """向 PG 向量库添加文档；首次写入后自动确保 HNSW 索引存在。"""
     vs = get_vector_store()
-    return vs.add_documents(docs)
+    ids = vs.add_documents(docs)
+    _ensure_hnsw_index()
+    return ids
 
 
 def delete_documents_from_store(doc_id: str) -> None:
-    """根据document_id元数据从Chroma collection中删除所有相关向量。
+    """按 document_id 元数据删除向量。
 
-    由于add_documents_to_store在入库时已将 document_id 写入每个chunk的metadata，这里通过 where 过滤条件精准删除该文档的全部向量，无需事先保存Chroma内部ID。pipeline.py 的 process_document 在重新处理前也应调用此函数，避免重复累积。"""
+    PGVector.delete 只支持按 id 删除（不支持按 metadata 过滤），
+    故直接对 langchain_pg_embedding 表执行 SQL（cmetadata 为 JSONB，支持 -> 取值）。
+    向量表尚未创建（首次上传/库为空）时无需删除，直接返回。
+    """
     try:
-        vs = get_vector_store()
-        logger.info(f"chroma delete: removing vectors with where={{document_id: {doc_id!r}}}")
-        vs.delete(where={"document_id": {"$eq": doc_id}})
-        logger.info(f"chroma delete: successfully removed vectors for document {doc_id}")
+        with _maintenance_engine().begin() as conn:
+            # 表还没创建（首次上传）时无需删除
+            if not conn.dialect.has_table(conn, "langchain_pg_embedding"):
+                logger.debug("pgvector tables not created yet, skip delete for %s", doc_id)
+                return
+            conn.execute(
+                text(
+                    "DELETE FROM langchain_pg_embedding "
+                    "WHERE collection_id = (SELECT uuid FROM langchain_pg_collection WHERE name = :c) "
+                    "AND cmetadata->>'document_id' = :d"
+                ),
+                {"c": settings.vector_collection_name, "d": doc_id},
+            )
+            logger.info("pgvector delete: removed vectors for document %s", doc_id)
     except Exception as e:
-        logger.exception(f"chroma delete failed for document {doc_id}: {e}")
+        logger.warning(f"pgvector delete failed for document {doc_id}: {e}")
 
 
 def get_retriever(k: int = 5, user_id: str | None = None) -> VectorStoreRetriever:
-    """为单个collection返回一个检索器，支持按用户过滤。"""
+    """返回检索器，支持按用户过滤。"""
     vs = get_vector_store()
     search_kwargs: dict = {"k": k}
     where = _user_where(user_id)
@@ -79,7 +122,7 @@ def get_retriever(k: int = 5, user_id: str | None = None) -> VectorStoreRetrieve
 
 
 def similarity_search(query: str, k: int = 5, user_id: str | None = None) -> list[Document]:
-    """对单个collection进行相似度搜索，支持按用户过滤。"""
+    """相似度搜索，支持按用户过滤。"""
     vs = get_vector_store()
     return vs.similarity_search(query, k=k, filter=_user_where(user_id))
 
@@ -99,8 +142,10 @@ def similarity_search_with_relevance(
 ) -> list[tuple[Document, float]]:
     """相似度搜索，返回 (Document, relevance_score) 元组列表，支持按用户过滤。
 
-    relevance_score 由 get_vector_store 里显式指定的 cosine 换算函数计算：score = 1 - cosine_distance，值域约 [0, 2]，越高越相关（>1 表示极强相关，正常相关文档通常在 [0, 1] 区间）。由调用方按 rag_min_score 阈值判断是否采用。
+    PGVector 的 similarity_search_with_score 返回 cosine 距离（越小越近），
+    这里换算为 relevance = 1 - distance，与 Chroma 版的分数语义完全一致
+    （正常相关文档落在 [0, 1] 区间，越高越相关）。
     """
     vs = get_vector_store()
-    # relevance_score_fn 已在 Chroma 构造时显式给定，因此无论集合实际度量如何，这里都会用同一换算逻辑，不会因旧 l2 索引而错乱。
-    return vs.similarity_search_with_relevance_scores(query, k=k, filter=_user_where(user_id))
+    docs_and_dist = vs.similarity_search_with_score(query, k=k, filter=_user_where(user_id))
+    return [(doc, 1.0 - dist) for doc, dist in docs_and_dist]

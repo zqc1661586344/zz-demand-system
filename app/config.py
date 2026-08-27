@@ -66,9 +66,13 @@ class Settings(BaseSettings):
     embedding_timeout_seconds: int = 30
     embedding_max_retries: int = 3
 
-    # Chroma 向量数据库配置
-    chroma_collection_name: str = "documents"
-    chroma_persist_dir: str = "./data/chroma"
+    # # Chroma 向量数据库配置
+    # chroma_collection_name: str = "documents"
+    # chroma_persist_dir: str = "./data/chroma"
+
+    # PGVector 向量库连接串（psycopg3 格式，替代 Chroma）。留空则无法使用向量库。
+    vector_store_url: str = ""
+    vector_collection_name: str = "documents"
 
     # 检索算法配置：similarity（默认）/ mmr（多样性）/ hybrid（向量+BM25+RRF融合）
     rag_search_type: Literal["similarity", "mmr", "hybrid"] = "hybrid"
@@ -106,6 +110,8 @@ class Settings(BaseSettings):
     # Celery 异步任务队列配置（为空字符串时不启用 Celery，回退 BackgroundTasks）
     celery_broker_url: str = ""
     celery_result_backend: str = ""
+    # celery异步处理开关
+    use_celery_task: bool = False
 
     # CORS（逗号分隔，生产环境必须覆盖；允许从 CORS_ORIGINS 环境变量读取）
     cors_origins: list[str] = ["*"]
@@ -124,14 +130,14 @@ class Settings(BaseSettings):
     chunk_size: int = 800
     chunk_overlap: int = 150
 
-    @property
-    def chroma_persist_path(self) -> Path:
-        """获取Chroma持久化存储路径的方法
+    # @property
+    # def chroma_persist_path(self) -> Path:
+    #     """获取Chroma持久化存储路径的方法
 
-        返回:
-            Path: Chroma数据库持久化存储的路径对象，该路径指向chroma_persist_dir属性指定的目录
-        """
-        return Path(self.chroma_persist_dir)  # 将chroma_persist_dir转换为Path对象并返回
+    #     返回:
+    #         Path: Chroma数据库持久化存储的路径对象，该路径指向chroma_persist_dir属性指定的目录
+    #     """
+    #     return Path(self.chroma_persist_dir)  # 将chroma_persist_dir转换为Path对象并返回
 
     @property
     def upload_path(self) -> Path:
@@ -170,6 +176,8 @@ class Settings(BaseSettings):
                 raise ValueError("生产环境必须修改 JWT_SECRET_KEY，禁止使用默认值")
             if self.cors_origins == ["*"]:
                 raise ValueError("生产环境 CORS 不允许通配符，请设置 CORS_ORIGINS")
+            if not self.vector_store_url:
+                raise ValueError("生产环境必须配置 VECTOR_STORE_URL（PGVector 连接串）")
         return self
 
 

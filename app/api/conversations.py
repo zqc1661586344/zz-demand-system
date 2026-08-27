@@ -65,7 +65,7 @@ def _maybe_summarize(db, conv_id, total):
             new_summary = generate_summary(history_all)
             update_summary(db, conv_id, new_summary)
         except Exception as e:
-            logger.warning("Failed to generate conversation summary: %s", e)
+            logger.warning("failed to generate conversation summary: %s", e)
 
 
 @router.post("", response_model=ConversationResponse, status_code=201)
@@ -217,7 +217,7 @@ def _save_messages_background(conv_id: str, answer: str, sources: list, free_cha
         )
         db.commit()
     except Exception as e:
-        logger.warning("Failed to save streamed messages: %s", e)
+        logger.warning("failed to save streamed messages: %s", e)
         db.rollback()
     finally:
         db.close()
