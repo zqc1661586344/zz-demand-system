@@ -186,8 +186,9 @@ def query_conversation(
         answer = result["answer"]
         sources = result["sources"]
         free_chat = bool(result.get("free_chat", False))
-    except Exception as e:
-        answer = f"RAG query failed: {str(e)}"
+    except Exception:
+        logger.exception("RAG query failed for conversation %s, query=%r", conv_id, req.query)
+        answer = "抱歉，问答服务暂时不可用，请稍后再试。"
         sources = []
 
     # Save user message

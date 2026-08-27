@@ -17,7 +17,9 @@ from app.services.auth_service import hash_password
 
 
 def _seed_demo_user():
-    """Create a demo user for development/testing."""
+    """Create a demo user for development/testing. 生产环境不创建。"""
+    if settings.environment == "production":
+        return
     db: Session = SessionLocal()
     try:
         demo = db.query(User).filter(User.username == "admin").first()

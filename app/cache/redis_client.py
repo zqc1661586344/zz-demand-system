@@ -24,13 +24,13 @@ _client: "redis.Redis | None" = None
 
 
 def get_redis_client() -> "redis.Redis | None":
-    """Return a shared Redis client, or None if Redis is not configured/unreachable."""
+    """返回一个共享的Redis客户端，如果Redis未配置或无法连接，则返回None。"""
     global _client
     if _client is not None:
         return _client
 
     if not settings.celery_broker_url:
-        logger.info("Redis not configured (celery_broker_url is empty) — BM25 cache local-only")
+        logger.info("redis not configured (celery_broker_url is empty) — BM25 cache local-only")
         return None
 
     try:
@@ -41,8 +41,8 @@ def get_redis_client() -> "redis.Redis | None":
             decode_responses=True,
         )
         _client.ping()
-        logger.info("Redis BM25 cache client connected (db=2)")
+        logger.info("redis BM25 cache client connected (db=2)")
         return _client
     except Exception:
-        logger.warning("Redis BM25 cache unavailable — falling back to local-only cache")
+        logger.warning("redis BM25 cache unavailable — falling back to local-only cache")
         return None

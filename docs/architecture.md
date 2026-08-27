@@ -761,9 +761,9 @@ StrOutputParser()
 
 **摘要 + 滑动窗口机制**（`app/api/conversations.py`）：
 
-- 最近 5 轮（10 条消息）完整保留在 prompt 中
-- 超过 5 轮的早期对话用 LLM 生成的 **summary** 替代
-- 每满 10 条消息自动触发一次摘要重生成（后台任务）
+- 最近 20 轮（40 条消息）完整保留在 prompt 中
+- 超过 20 轮的早期对话用 LLM 生成的 **summary** 替代
+- 每满 40 条消息自动触发一次摘要重生成（后台任务）
 - summary 存入 `conversations.summary` 字段持久化
 
 ### 9.10 SSE 流式协议

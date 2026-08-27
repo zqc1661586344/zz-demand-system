@@ -11,7 +11,7 @@ from app.database import SessionLocal
 from app.logging_config import get_logger
 from app.models.document import Document as DocModel
 from app.models.document import DocumentChunk
-from app.rag.retrievers import invalidate_other_users_bm25, refresh_bm25_for_user
+from app.rag.retrievers import mark_bm25_data_changed, refresh_bm25_for_user
 from app.rag.splitters import get_default_splitter
 from app.rag.vector_store import add_documents_to_store, delete_documents_from_store
 from app.services.document_service import update_document_status
@@ -130,11 +130,11 @@ def process_document(doc_id: str) -> None:
         update_document_status(db, doc_id, "indexed", chunk_count=len(chunks))
         logger.info(f"document {doc_id}: indexed {len(chunks)} chunks")
 
-        # 增量刷新该用户的 BM25 索引（从 DB 而非 Chroma 全量读取）
+        # 文档数据变更：先广播数据版本号（使所有 worker 的相关缓存失效），
+        # 再增量重建本进程自己的索引。
+        is_shared = getattr(doc, "visibility", "private") == "shared"
+        mark_bm25_data_changed(str(doc.uploaded_by), shared=is_shared)
         refresh_bm25_for_user(str(doc.uploaded_by))
-        # 共享文档变更 → 其他用户的 BM25 缓存失效（下次查询懒加载重建）
-        if getattr(doc, "visibility", "private") == "shared":
-            invalidate_other_users_bm25(except_user_id=str(doc.uploaded_by))
 
     except (FileNotFoundError, ValueError) as e:
         logger.exception(f"document {doc_id}: non-retryable error")

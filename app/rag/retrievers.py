@@ -30,7 +30,7 @@ jieba.initialize()
 # ---------------------------------------------------------------------------
 _bm25_map: dict[str, "BM25Retriever | None"] = {}  # key: user_id or "__all__"
 _bm25_ts_map: dict[str, float] = {}  # Redis timestamp snapshot per key
-_bm25_lock = threading.Lock()
+_bm25_lock = threading.RLock()
 _BM25_LRU_MAX = 500  # 进程内 LRU 缓存上限，防止内存无限增长
 # "加载中"标记：防止 TOCTOU 竞态下多个线程同时重建同一用户的 BM25 索引
 _LOADING: "BM25Retriever | None" = object()  # type: ignore[assignment]
@@ -67,28 +67,32 @@ def _redis_ts_key(user_key: str) -> str:
     return f"bm25:ts:{user_key}"
 
 
-def _update_redis_ts(user_key: str) -> None:
-    """更新 Redis 中该用户的 BM25 时间戳（原子操作）。"""
+def _set_redis_ts(user_key: str, value: float) -> None:
+    """写入数据版本号（Redis），仅由"数据变更"路径（mark_bm25_data_changed）调用。"""
     from app.cache.redis_client import get_redis_client
 
     r = get_redis_client()
     if r is not None:
         try:
-            r.setex(_redis_ts_key(user_key), settings.redis_bm25_cache_ttl_seconds, time.time())
+            r.setex(_redis_ts_key(user_key), settings.redis_bm25_cache_ttl_seconds, value)
         except Exception:
             logger.debug("Failed to update Redis BM25 ts for %s", user_key)
 
 
-def _invalidate_redis_ts(user_key: str) -> None:
-    """删除 Redis 中该用户的 BM25 时间戳，使其立即过期。"""
+def _get_redis_ts(user_key: str) -> float | None:
+    """读取数据版本号；未配置 Redis / 无记录 / 已过期返回 None。"""
+    if not settings.celery_broker_url:
+        return None
     from app.cache.redis_client import get_redis_client
 
     r = get_redis_client()
-    if r is not None:
-        try:
-            r.delete(_redis_ts_key(user_key))
-        except Exception:
-            pass
+    if r is None:
+        return None
+    try:
+        ts = r.get(_redis_ts_key(user_key))
+        return float(ts) if ts is not None else None
+    except Exception:
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +126,7 @@ def refresh_bm25_for_user(user_id: str) -> None:
         metadatas = [json.loads(c.meta_json) if c.meta_json else {} for c in chunks]
 
         _rebuild_bm25_for_key(user_id, texts, metadatas)
-        _update_redis_ts(user_id)
+        # 注意：不再调用 _update_redis_ts —— 这里只重建本地索引，不写数据版本号
     finally:
         db.close()
 
@@ -139,30 +143,37 @@ def refresh_bm25_all() -> None:
         metadatas = [json.loads(c.meta_json) if c.meta_json else {} for c in chunks]
 
         _rebuild_bm25_for_key("__all__", texts, metadatas)
-        _update_redis_ts("__all__")
+        # 注意：不再调用 _update_redis_ts —— 这里只重建本地索引，不写数据版本号
     finally:
         db.close()
 
 
-def invalidate_other_users_bm25(except_user_id: str | None = None) -> None:
-    """清空其他普通用户的BM25缓存 —— 共享文档变更时调用。
+def mark_bm25_data_changed(user_id: str | None = None, *, shared: bool = False) -> None:
+    """文档上传/删除后调用：更新数据版本号（Redis）并清空本地缓存。
 
-    上传/删除共享文档后，除了上传者（已单独刷新）之外，其他用户的BM25索引以及superuser的全量索引（__all__）都需失效化，下次查询时通过get_bm25_for_user懒加载重建。
+    数据版本号（Redis TS）只在"数据变更"路径更新，供多 worker 在下次查询时按版本号
+    懒重建；本地缓存在本进程内同步清空。懒重建本身不再写版本号，避免"自己刚建完又被判
+    过期"的自失效。
 
     Args:
-        except_user_id: 保留的用户ID（通常是上传者，其BM25已单独刷新）
+        user_id: 直接受影响的用户 ID（其私有+共享索引需重建）。None 表示不指定具体用户。
+        shared: 变更的是共享文档，会影响其他所有用户的索引，需一并失效。
     """
+    now = time.time()
+    # superuser 全量索引（__all__）包含所有私有+共享文档，任何变更都使其失效
+    keys: set[str] = {"__all__"}
+    if user_id:
+        keys.add(str(user_id))
+    if shared:
+        with _bm25_lock:
+            keys.update(_bm25_map.keys())  # 本进程已知的所有用户索引均受共享文档影响
+
     with _bm25_lock:
-        for key in list(_bm25_map.keys()):
-            if except_user_id is not None and key == except_user_id:
-                continue
-            _bm25_map.pop(key, None)
-            _bm25_ts_map.pop(key, None)
-            _invalidate_redis_ts(key)
-    logger.info(
-        "invalidated BM25 for other users (kept %s)",
-        except_user_id or "none",
-    )
+        for k in keys:
+            _bm25_map.pop(k, None)
+            _bm25_ts_map.pop(k, None)
+    for k in keys:
+        _set_redis_ts(k, now)
 
 
 def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
@@ -192,36 +203,28 @@ def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
             cached = _bm25_map.get(key)
             return cached if cached is not _LOADING else None
 
-    # ---- Redis 新鲜度检查 ----
-    redis_ts: float | None = None
-    if settings.celery_broker_url:
-        from app.cache.redis_client import get_redis_client
-
-        r = get_redis_client()
-        if r is not None:
-            try:
-                ts_str = r.get(_redis_ts_key(key))
-                if ts_str is not None:
-                    redis_ts = float(ts_str)
-            except Exception:
-                pass
+    # ---- Redis 数据版本号检查 ----
+    redis_ts = _get_redis_ts(key)
 
     with _bm25_lock:
-        if redis_ts is not None:
-            # Redis 模式下：比较本地快照与 Redis 时间戳
-            local_ts = _bm25_ts_map.get(key, 0.0)
-            if key in _bm25_map and _bm25_map[key] is not _LOADING and local_ts >= redis_ts:
-                return _bm25_map[key]
-        else:
-            # 无 Redis：纯本地缓存模式
+        if redis_ts is None:
+            # 无 Redis：纯本地缓存模式（None 空索引也是合法缓存值，避免反复重建）
             if key in _bm25_map:
                 cached = _bm25_map[key]
                 return cached if cached is not _LOADING else None
+        else:
+            # Redis 模式：本地索引不旧于数据版本号则命中缓存（None 空索引也是合法缓存值）
+            if key in _bm25_map:
+                cached = _bm25_map[key]
+                if cached is not _LOADING:
+                    local_ts = _bm25_ts_map.get(key, 0.0)
+                    if local_ts >= redis_ts:
+                        return cached
 
         # 缓存缺失 / 过期 → 标记为加载中（在锁内，防止竞态）
         _bm25_map[key] = _LOADING  # type: ignore[assignment]
 
-    # ---- 锁外重建（避免锁内 IO） ----
+    # ---- 锁外重建（避免锁内 IO）——懒重建不写 Redis 版本号 ----
     try:
         if key == "__all__":
             refresh_bm25_all()
@@ -235,6 +238,9 @@ def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
         return None
 
     with _bm25_lock:
+        if redis_ts is not None:
+            # 本地构建时间对齐数据版本号，避免下次误判过期
+            _bm25_ts_map[key] = redis_ts
         return _bm25_map.get(key)
 
 

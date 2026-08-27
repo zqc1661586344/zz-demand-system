@@ -1,4 +1,5 @@
 """Rate limiting — slowapi integration for API endpoints."""
+
 from app.config import settings
 
 __all__ = []
@@ -7,7 +8,7 @@ _limiter = None
 
 
 def get_limiter():
-    """Lazy-init limiter singleton（避免 import 时无 settings）。"""
+    """延迟初始化限制器单例（避免 import 时无 settings）。"""
     global _limiter
     if _limiter is None:
         from slowapi import Limiter

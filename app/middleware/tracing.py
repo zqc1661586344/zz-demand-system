@@ -10,8 +10,7 @@ request_id_var: ContextVar[str] = ContextVar("request_id", default="")
 
 
 class TracingMiddleware(BaseHTTPMiddleware):
-    """为每个请求生成唯一的 request_id（或透传客户端发来的 X-Request-ID），
-    注入到 contextvars 供日志 Filter 使用，并在响应头中返回 X-Request-ID。
+    """为每个请求生成唯一的 request_id（或透传客户端发来的 X-Request-ID），注入到 contextvars 供日志 Filter 使用，并在响应头中返回 X-Request-ID。
     """
 
     async def dispatch(self, request: Request, call_next):

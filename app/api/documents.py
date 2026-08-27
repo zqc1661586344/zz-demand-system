@@ -4,19 +4,19 @@ import os
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File
 from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.middleware.rate_limit import get_limiter
+from app.models.document import Document
 from app.models.user import User
 from app.schemas.document import DocumentResponse, DocumentUploadResponse, ReprocessResponse
 from app.services.document_service import (
     create_document,
     delete_document,
-    get_all_documents,
     get_document_by_id,
     update_document_status,
 )
@@ -36,6 +36,7 @@ ALLOWED_EXTENSIONS = set(settings.allowed_extensions)
 @get_limiter().limit(settings.rate_limit_upload)
 async def upload_document(
     request: Request,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     visibility: str = "private",
     db: Session = Depends(get_db),
@@ -76,6 +77,12 @@ async def upload_document(
     logger.info("file_path: %s", file_path)
 
     content = await file.read()
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    if len(content) > max_bytes:
+        raise HTTPException(
+            status_code=413,
+            detail=f"文件超过 {settings.max_upload_size_mb}MB 大小限制",
+        )
     with open(file_path, "wb") as f:
         f.write(content)
 
@@ -97,10 +104,7 @@ async def upload_document(
 
         process_document_task.delay(doc.id)
     else:
-        # 无 Celery 时回退 BackgroundTasks（开发模式）
-        from fastapi import BackgroundTasks
-
-        background_tasks = BackgroundTasks()
+        # 无 Celery 时回退 BackgroundTasks（开发模式）—— 使用 FastAPI 注入的实例
         from app.rag.pipeline import process_document
 
         background_tasks.add_task(process_document, doc.id)
@@ -115,7 +119,10 @@ def list_documents(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return get_all_documents(db, skip=skip, limit=limit)
+    q = db.query(Document)
+    if not current_user.is_superuser:
+        q = q.filter(Document.uploaded_by == current_user.id)
+    return q.offset(skip).limit(limit).all()
 
 
 @router.get("/{doc_id}", response_model=DocumentResponse)
@@ -127,6 +134,8 @@ def get_document(
     doc = get_document_by_id(db, doc_id)
     if doc is None:
         raise HTTPException(status_code=404, detail="Document not found")
+    if doc.uploaded_by != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Permission denied")
     return doc
 
 
@@ -149,6 +158,7 @@ def delete_document_route(
 @router.post("/{doc_id}/reprocess", response_model=ReprocessResponse)
 def reprocess_document(
     doc_id: str,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -163,8 +173,7 @@ def reprocess_document(
 
         process_document_task.delay(doc_id)
     else:
-        from fastapi import BackgroundTasks
         from app.rag.pipeline import process_document
 
-        BackgroundTasks().add_task(process_document, doc_id)
+        background_tasks.add_task(process_document, doc_id)
     return ReprocessResponse(id=doc_id, status="pending")

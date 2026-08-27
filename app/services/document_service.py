@@ -62,13 +62,11 @@ def delete_document(db: Session, doc_id: str) -> bool:
     db.query(DocumentChunk).filter(DocumentChunk.document_id == doc_id).delete()
     db.commit()  # 先提交，确保 refresh_bm25_for_user 内的独立 DB 会话能看到删除结果
 
-    # 重建该用户的 BM25 索引
-    from app.rag.retrievers import invalidate_other_users_bm25, refresh_bm25_for_user
+    # 通知所有 worker 数据已变更（上传者 + __all__，共享文档额外波及所有本进程已知用户），
+    # 各 worker 在下次查询时按版本号懒重建，无需在此同步全量重建。
+    from app.rag.retrievers import mark_bm25_data_changed
 
-    refresh_bm25_for_user(owner_id)
-    if visibility == "shared":
-        # 共享文档变更 → 其他用户的 BM25 缓存失效（下次查询懒加载重建）
-        invalidate_other_users_bm25(except_user_id=owner_id)
+    mark_bm25_data_changed(owner_id, shared=(visibility == "shared"))
 
     # Remove file from disk
     if doc.file_path and os.path.exists(doc.file_path):
