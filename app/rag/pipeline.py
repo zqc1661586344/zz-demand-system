@@ -73,6 +73,11 @@ def process_document(doc_id: str) -> None:
         update_document_status(db, doc_id, "processing")
 
         logger.info(f"the file name is: {doc.filename}, the file type is: {doc.mime_type}")
+
+        # 检查文件是否存在（必须在 load_document 之前，否则死代码）
+        if not Path(doc.file_path).exists():
+            raise FileNotFoundError(f"File not found on disk: {doc.file_path}")
+
         # 按文件类型加载文档
         try:
             raw_docs = load_document(doc.file_path, doc.mime_type)
@@ -80,10 +85,6 @@ def process_document(doc_id: str) -> None:
             logger.error(f"unsupported file type for doc {doc_id}: {e}")
             update_document_status(db, doc_id, "failed", error_message=str(e))
             return
-
-        # 检查文件是否存在
-        if not Path(doc.file_path).exists():
-            raise FileNotFoundError(f"File not found on disk: {doc.file_path}")
 
         # 添加元数据
         for d in raw_docs:
@@ -97,9 +98,14 @@ def process_document(doc_id: str) -> None:
         chunks = splitter.split_documents(raw_docs)
 
         if not chunks:
-            # 如果没有切分出任何chunk，则标记为indexed
-            update_document_status(db, doc_id, "indexed", chunk_count=0)
-            logger.info(f"document {doc_id}: empty after splitting, marked indexed")
+            # 切分后没有任何 chunk（文件为空/全空白/扫描件无文本层）→ 无可检索内容，标记 failed
+            update_document_status(
+                db,
+                doc_id,
+                "failed",
+                error_message="未提取到文本内容（可能为空文件或扫描件，暂不支持 OCR）",
+            )
+            logger.warning(f"document {doc_id}: empty after splitting, marked failed")
             return
 
         # 清理该文档在 Chroma 中的旧向量（防止重复处理时累积孤儿条目）

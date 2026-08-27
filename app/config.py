@@ -50,6 +50,8 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_api_base: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
+    llm_timeout_seconds: int = 60
+    llm_max_retries: int = 3
 
     # LLM 使用ollama加载的模型配置
     ollama_base_url: str = "http://localhost:11434"
@@ -61,6 +63,8 @@ class Settings(BaseSettings):
     embedding_api_key: str = ""
     embedding_api_base: str = "https://api.openai.com/v1"
     embedding_model: str = "BAAI/bge-m3"
+    embedding_timeout_seconds: int = 30
+    embedding_max_retries: int = 3
 
     # Chroma 向量数据库配置
     chroma_collection_name: str = "documents"

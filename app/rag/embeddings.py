@@ -35,6 +35,8 @@ def get_embedding_model():
             api_key=settings.embedding_api_key,
             base_url=settings.embedding_api_base,
             check_embedding_ctx_length=False,
+            timeout=settings.embedding_timeout_seconds,
+            max_retries=settings.embedding_max_retries,
         )
 
     elif provider == "ollama":

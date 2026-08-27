@@ -205,21 +205,30 @@ def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
 
     # ---- Redis 数据版本号检查 ----
     redis_ts = _get_redis_ts(key)
+    # 共享文档变更会更新 "__all__" 版本号；若本用户的 key 已过期（Redis_ts=None），
+    # 仍须通过 __all__ 感知共享文档变化，否则该 worker 会永远读到旧共享内容。
+    if key != "__all__":
+        all_ts = _get_redis_ts("__all__")
+        if all_ts is not None:
+            redis_ts = max(redis_ts or 0.0, all_ts)
 
     with _bm25_lock:
-        if redis_ts is None:
-            # 无 Redis：纯本地缓存模式（None 空索引也是合法缓存值，避免反复重建）
-            if key in _bm25_map:
-                cached = _bm25_map[key]
-                return cached if cached is not _LOADING else None
-        else:
-            # Redis 模式：本地索引不旧于数据版本号则命中缓存（None 空索引也是合法缓存值）
-            if key in _bm25_map:
-                cached = _bm25_map[key]
-                if cached is not _LOADING:
-                    local_ts = _bm25_ts_map.get(key, 0.0)
-                    if local_ts >= redis_ts:
-                        return cached
+        if key in _bm25_map:
+            cached = _bm25_map[key]
+            if cached is _LOADING:
+                return None
+            if redis_ts is None:
+                # 未配置 Redis/Celery：纯本地缓存模式（None 空索引也是合法缓存值）
+                if not settings.celery_broker_url:
+                    return cached
+                # 配置了 Redis 但读不到版本号 → fail-closed：视为已失效，清空缓存并重建
+                _bm25_map.pop(key, None)
+                _bm25_ts_map.pop(key, None)
+            else:
+                # Redis 模式：本地索引不旧于数据版本号则命中缓存（None 空索引也是合法缓存值）
+                local_ts = _bm25_ts_map.get(key, 0.0)
+                if local_ts >= redis_ts:
+                    return cached
 
         # 缓存缺失 / 过期 → 标记为加载中（在锁内，防止竞态）
         _bm25_map[key] = _LOADING  # type: ignore[assignment]
@@ -323,7 +332,8 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
         ).invoke(query)[:top_k]
 
     # 2. BM25 有命中 → 无需 spread，直接 ensemble
-    sparse.k = top_k
+    # 注意：不修改 sparse.k —— 它是跨请求共享的缓存单例，改写会在并发下互相覆盖；
+    # 结果数量由最后的 [:top_k] 切片统一控制。
     vs = get_vector_store()
     dense_retriever = vs.as_retriever(
         search_kwargs={
@@ -371,19 +381,9 @@ def _maybe_rerank(query: str, docs: list[Document]) -> list[Document] | None:
     if reranker is None:
         return None
 
-    from langchain_classic.retrievers import ContextualCompressionRetriever
-    from langchain_community.vectorstores import InMemoryVectorStore
-
-    from app.rag.embeddings import get_embedding_model
-
     try:
-        im_vs = InMemoryVectorStore.from_documents(docs, get_embedding_model())
-        base_retriever = im_vs.as_retriever(search_kwargs={"k": len(docs)})
-        compressor = ContextualCompressionRetriever(
-            base_compressor=reranker,
-            base_retriever=base_retriever,
-        )
-        return compressor.invoke(query)[: settings.rag_rerank_top_n]
+        reranked = reranker.compress_documents(query=query, documents=docs)
+        return list(reranked)[: settings.rag_rerank_top_n]
     except Exception as exc:  # noqa: BLE001 — broad catch is intentional: fall back gracefully
         logger.warning("reranker failed, falling back to unranked results: %s", exc)
         return None

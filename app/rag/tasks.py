@@ -7,11 +7,28 @@ from app.models.document import Document
 from app.rag.pipeline import process_document as _process_document
 
 
+def _get_openai_errors() -> tuple[type[Exception], ...]:
+    """OpenAI SDK 瞬时异常（仅在 SDK 已安装时可用）。"""
+    try:
+        import openai
+    except ImportError:
+        return ()
+    return (
+        openai.APIConnectionError,
+        openai.APITimeoutError,
+        openai.RateLimitError,
+        openai.InternalServerError,
+    )
+
+
+RETRY_EXCEPTIONS = (ConnectionError, TimeoutError, OSError) + _get_openai_errors()
+
+
 @celery_app.task(
     bind=True,
     max_retries=3,
     default_retry_delay=30,
-    autoretry_for=(ConnectionError, TimeoutError, OSError),
+    autoretry_for=RETRY_EXCEPTIONS,
     acks_late=True,
     reject_on_worker_lost=True,
 )

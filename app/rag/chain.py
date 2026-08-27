@@ -13,17 +13,15 @@ from app.rag.vector_store import mmr_search, similarity_search_with_relevance
 
 logger = get_logger(__name__)
 
-# RAG提示词模板
+# RAG提示词模板（中文，适配中文文档/中文问答场景）
 RAG_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are a helpful assistant for internal knowledge base queries. "
-            "Use the following context to answer the user's question. "
-            "If you don't know the answer based on the context, say so clearly. "
-            "Always cite the source document names in your answer.\n\n"
-            "Context:\n{context}\n\n"
-            "Conversation history:\n{history}",
+            "你是一个知识库问答助手。请根据以下上下文回答用户问题。"
+            "如果上下文不足以回答问题，请如实说明，不要编造。回答时请标注信息来源。\n\n"
+            "上下文：\n{context}\n\n"
+            "对话历史：\n{history}",
         ),
         ("human", "{question}"),
     ]
@@ -95,11 +93,9 @@ FREE_CHAT_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are a helpful assistant. The user's question was checked against an "
-            "internal knowledge base but no relevant document was found. Answer the "
-            "user's question based on your own knowledge. If you are "
-            "unsure, say so honestly.\n\n"
-            "Conversation history:\n{history}",
+            "你是一个通用问答助手。用户的问题未能在知识库中找到相关文档，"
+            "请基于你自身的知识回答。如果不确定，请如实说明。\n\n"
+            "对话历史：\n{history}",
         ),
         ("human", "{question}"),
     ]
@@ -122,11 +118,41 @@ def _build_free_chat_chain():
     return _free_chat_chain
 
 
-def _retrieve_relevant_docs(query: str, top_k: int, user_id: str | None = None) -> list:
+# 查询改写提示词：将多轮对话中的指代/省略问题改写为独立查询
+CONTEXTUALIZE_Q_SYSTEM = (
+    "给定以下对话历史和用户最新问题，请将用户问题改写为一个独立完整的查询，"
+    "使其在不看对话历史的情况下也能被理解。如果无需改写，请原样返回。"
+)
+
+
+def _rewrite_query(query: str, history: list[dict] | None) -> str:
+    """将当前问题结合历史改写为独立查询；失败或无历史时返回原问题。"""
+    if not history:
+        return query
+    try:
+        messages: list[tuple[str, str]] = [("system", CONTEXTUALIZE_Q_SYSTEM)]
+        for msg in history:
+            role = "user" if msg.get("role") == "user" else "assistant"
+            messages.append((role, msg.get("content", "")))
+        messages.append(("human", query))
+        prompt = ChatPromptTemplate.from_messages(messages)
+        chain = prompt | get_llm() | StrOutputParser()
+        rewritten = chain.invoke({})
+        return (rewritten or query).strip() or query
+    except Exception:
+        logger.warning("query rewrite failed, falling back to original query", exc_info=True)
+        return query
+
+
+def _retrieve_relevant_docs(
+    query: str, top_k: int, user_id: str | None = None, history: list[dict] | None = None
+) -> list:
     """按配置的检索算法取回文档，并用相关性阈值过滤掉不相关的结果。
 
     返回的列表为空表示"文档中没有相关内容"，调用方应回退到自由聊天。
     """
+    # 多轮对话：先改写为独立查询，再用于检索
+    query = _rewrite_query(query, history)
 
     # 混合检索（spread判定已在hybrid_search内部完成，无需再重复查 Chroma）
     if settings.rag_search_type == "hybrid":
@@ -143,7 +169,11 @@ def _retrieve_relevant_docs(query: str, top_k: int, user_id: str | None = None) 
         if not docs:
             return []
         scored = similarity_search_with_relevance(query, k=len(docs), user_id=user_id)
-        if scored and scored[0][1] < settings.rag_min_score:
+        if not scored:
+            # cosine 无任何命中 → MMR 的多样性结果不能作为回答依据，回退 free chat
+            logger.info("MMR returned %d docs but cosine found no matches → free chat", len(docs))
+            return []
+        if scored[0][1] < settings.rag_min_score:
             logger.info(
                 "MMR top-1=%.3f below min_score=%.3f → reverting to free chat",
                 scored[0][1],
@@ -178,7 +208,7 @@ def query_rag(
     history_text = format_history(history, summary=summary)
 
     # 检索相关文档（带相关性分数，用于阈值过滤）
-    docs = _retrieve_relevant_docs(query, top_k, user_id=user_id)
+    docs = _retrieve_relevant_docs(query, top_k, user_id=user_id, history=history)
 
     if not docs:
         # 检索为空或相关性不足 → 不走 RAG，改为纯 LLM 自由聊天（基于自身知识回答，不附带来源）。
@@ -219,7 +249,7 @@ def query_rag_stream(
     history_text = format_history(history, summary=summary)
 
     # 检索相关文档（带相关性分数，用于阈值过滤）
-    docs = _retrieve_relevant_docs(query, top_k, user_id=user_id)
+    docs = _retrieve_relevant_docs(query, top_k, user_id=user_id, history=history)
 
     if not docs:
         # 提示语由前端按 free_chat 标记渲染，不进入模型输出路径
@@ -251,11 +281,13 @@ SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
     [
         (
             "system",
-            "You are an expert at conversation summarization. "
-            "Read the following conversation between a User and an Assistant, "
-            "and produce a concise summary that captures all key information: "
-            "facts the user has mentioned, questions asked, and answers given. "
-            "Keep the summary to 3-5 sentences.",
+            (
+                "You are an expert at conversation summarization. "
+                "Read the following conversation between a User and an Assistant, "
+                "and produce a concise summary that captures all key information: "
+                "facts the user has mentioned, questions asked, and answers given. "
+                "Keep the summary to 3-5 sentences."
+            ),
         ),
         ("human", "{conversation}"),
     ]

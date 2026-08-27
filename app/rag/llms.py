@@ -54,6 +54,8 @@ def get_llm():
             temperature=0.3,
             api_key=settings.llm_api_key,
             base_url=settings.llm_api_base,
+            timeout=settings.llm_timeout_seconds,
+            max_retries=settings.llm_max_retries,
         )
 
     elif provider == "ollama":

@@ -60,6 +60,34 @@ def get_messages(
     )
 
 
+def count_messages(db: Session, conversation_id: str) -> int:
+    """返回对话中的消息总数（用于摘要触发判断，不受分页 limit 截断）。"""
+    return (
+        db.query(Message)
+        .filter(Message.conversation_id == conversation_id)
+        .count()
+    )
+
+
+def get_recent_messages(
+    db: Session, conversation_id: str, limit: int = 100
+) -> list[Message]:
+    """返回最近 N 条消息，已反转为时间正序（DESC 取头 + 反转，保证不丢最新消息）。
+
+    注意与 get_messages 的区别：get_messages(ASC + LIMIT) 取的是【最早】N 条，
+    消息超过 N 条后会丢失最新上下文；本函数专用于构建 LLM 对话历史。
+    """
+    return list(
+        reversed(
+            db.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .order_by(Message.created_at.desc())
+            .limit(limit)
+            .all()
+        )
+    )
+
+
 def add_message(
     db: Session,
     conversation_id: str,

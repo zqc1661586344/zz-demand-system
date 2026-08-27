@@ -22,11 +22,13 @@ from app.schemas.conversation import (
 )
 from app.services.conversation_service import (
     add_message,
+    count_messages,
     create_conversation,
     delete_conversation,
     get_conversation_by_id,
     get_conversations_for_user,
     get_messages,
+    get_recent_messages,
     update_summary,
 )
 
@@ -40,17 +42,15 @@ logger = get_logger(__name__)
 
 
 def _build_history(conv, db, conv_id):
-    """根据之前的消息构建历史记录和摘要。返回（历史记录，摘要，总数）。"""
-    prior_msgs = get_messages(db, conv_id, limit=100)
-    total = len(prior_msgs)
+    """根据之前的消息构建历史记录和摘要。返回（历史记录，摘要，总数）。
 
-    if total > RECENT_ROUNDS * 2:
-        recent_raw = prior_msgs[-(RECENT_ROUNDS * 2) :]
-        history = [{"role": m.role, "content": m.content} for m in recent_raw]
-        summary = conv.summary
-    else:
-        history = [{"role": m.role, "content": m.content} for m in prior_msgs]
-        summary = None
+    total 用 count_messages 取真实总数（旧实现用截断后的 len(<=100) 会导致
+    超长对话丢失最新上下文且摘要停更）；历史取最近 RECENT_ROUNDS*2 条（时间正序）。
+    """
+    total = count_messages(db, conv_id)
+    recent_msgs = get_recent_messages(db, conv_id, limit=RECENT_ROUNDS * 2)
+    history = [{"role": m.role, "content": m.content} for m in recent_msgs]
+    summary = conv.summary if total > RECENT_ROUNDS * 2 else None
 
     return history, summary, total
 
@@ -59,7 +59,8 @@ def _maybe_summarize(db, conv_id, total):
     """每达到SUMMARY_INTERVAL条消息时触发摘要重新生成。"""
     if (total + 2) >= SUMMARY_INTERVAL and (total + 2) % SUMMARY_INTERVAL == 0:
         try:
-            all_msgs = get_messages(db, conv_id, limit=100)
+            # 取全量消息（limit=total+2 覆盖真实总数，不再被硬编码 100 截断）
+            all_msgs = get_recent_messages(db, conv_id, limit=total + 2)
             history_all = [{"role": m.role, "content": m.content} for m in all_msgs]
             new_summary = generate_summary(history_all)
             update_summary(db, conv_id, new_summary)
