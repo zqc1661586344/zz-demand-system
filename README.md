@@ -1,6 +1,6 @@
 # Enterprise RAG System
 
-> **企业级 RAG 文档问答系统** — 基于 FastAPI + LangChain + Streamlit 构建
+> **企业级 RAG 文档问答系统** — 基于 FastAPI + LangChain + Streamlit + PostgreSQL(pgvector) 构建
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
@@ -9,7 +9,7 @@
 
 ## 📋 项目简介
 
-企业级 RAG（Retrieval-Augmented Generation）文档问答系统，支持**多用户多角色**的文档管理、**文档处理管线**（PDF/TXT/MD/DOCX → 分块 → 向量化索引 + BM25 索引）、以及三种检索模式（纯向量 / MMR 多样性 / Hybrid BM25+向量+RRF 融合）的**智能问答**。内置可扩展的业务流程引擎，支持未来升级到 LangGraph 复杂工作流编排。
+企业级 RAG（Retrieval-Augmented Generation）文档问答系统，支持**多用户多角色**的文档管理、**文档处理管线**（PDF/TXT/MD/DOCX → 分块 → 向量化索引 + 稀疏关键词索引）、以及三种检索模式（纯向量 / MMR 多样性 / Hybrid 双路召回 + RRF 融合）的**智能问答**。内置可扩展的业务流程引擎，支持未来升级到 LangGraph 复杂工作流编排。
 
 ### 核心功能
 
@@ -71,7 +71,7 @@ OLLAMA_EMBEDDING_MODEL=BAAI/bge-m3
 **使用测试模式（无需外部 API）**：
 ```bash
 # 通过环境变量启动
-LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8001
+LLM_PROVIDER=test EMBEDDING_PROVIDER=test .venv/bin/uvicorn app.main:app --port 8001
 ```
 
 ### 3. 启动服务
@@ -97,7 +97,7 @@ bash start.sh
 
 > 也可以单独启动后端：
 > ```bash
-> uvicorn app.main:app --reload --port 8001
+> .venv/bin/uvicorn app.main:app --reload --port 8001
 > ```
 
 ---
@@ -128,6 +128,7 @@ bash start.sh
 | `MAX_UPLOAD_SIZE_MB` | 否 | `50` | 单文件最大上传大小 |
 | `RAG_SEARCH_TYPE` | 否 | `hybrid` | 检索模式：`similarity`（纯向量）/ `mmr`（多样性）/ `hybrid`（BM25+向量+RRF 融合） |
 | `RAG_HYBRID_ALPHA` | 否 | `0.5` | Hybrid 中稠密 vs 稀疏权重（0=纯 BM25，1=纯向量） |
+| `RAG_SPARSE_BACKEND` | 否 | `pg_tsvector` | 稀疏检索后端：`pg_tsvector`（PG 原生 tsvector+GIN，增量零内存，默认）/ `bm25_memory`（进程内 BM25，回退） |
 | `RAG_HYBRID_MIN_SPREAD` | 否 | `0.015` | Hybrid 模式的分数离散度阈值：top1-top2 低于此值回退自由聊天 |
 | `RAG_MIN_SCORE` | 否 | `0.4` | 纯向量模式的相关性分数阈值（低于此值回退自由聊天） |
 | `RAG_RERANK_ENABLED` | 否 | `false` | 是否启用 bge-reranker 交叉编码器重排（需 transformers + torch） |
@@ -174,14 +175,14 @@ flowchart LR
 
 ## 🔎 RAG 检索流程
 
-系统采用 **Hybrid RAG**：稠密向量（Chroma + bge-m3）与稀疏关键词（BM25 + jieba 中文分词）双路召回，RRF 融合排序，可选交叉编码器重排。
+系统采用 **Hybrid RAG**：稠密向量（PGVector + bge-m3）与稀疏关键词（PG tsvector + jieba 中文分词，旧版/回退用内存 BM25）双路召回，RRF 融合排序，可选交叉编码器重排。
 
 ```mermaid
 flowchart TD
     Q["用户提问"] --> H["组装对话历史（最近 5 轮 + 更早摘要）"]
     H --> D{"检索模式 RAG_SEARCH_TYPE"}
     D -->|hybrid| DH["PGVector 稠密检索<br/>bge-m3 cosine"]
-    D -->|hybrid| SH["BM25 稀疏检索<br/>jieba 分词"]
+    D -->|hybrid| SH["稀疏检索<br/>PG tsvector + jieba 分词<br/>或内存 BM25"]
     DH --> F["RRF 融合"]
     SH --> F
     F --> R["可选 bge-reranker 重排"]
@@ -199,8 +200,9 @@ flowchart TD
 
 **核心设计要点**：
 - **三种检索模式**：`hybrid`（默认）/ `similarity` / `mmr`，通过 `RAG_SEARCH_TYPE` 切换。
+- **稀疏后端可切换**：默认 `RAG_SPARSE_BACKEND=pg_tsvector`（PG 原生全文检索，增量、零内存驻留，适合大文档量）；旧版 `bm25_memory`（进程内全量 BM25）作为回退保留。
 - **无命中回退**：hybrid 用「绝对分数 + 分数离散度」双判据；三者检索为空或判定不相关时，回退到`自由聊天`（前缀标注 *「当前已有文档中找不到答案…」*，不附带来源）。
-- **文档生命周期**：上传/删除后自动从 PGVector 全量重建 BM25 内存索引，保证关键词检索与向量索引一致。
+- **文档生命周期**：上传时对每个 chunk 用 jieba 分词写入 `search_text`，删除时随行删除——增量维护，无需全量重建索引；旧库启动时由 `ensure_fts_index()` 自动补列 + 建 GIN 索引。
 
 > 📄 **详细流程**：完整的多路检索结构、RRF 融合公式、重排器配置、FAQ 见 [`docs/RAG.md`](docs/RAG.md)；端到端架构见 [`docs/architecture.md`](docs/architecture.md)。
 
@@ -387,7 +389,7 @@ WantedBy=multi-user.target
 
 ```bash
 # 1. 启动服务（测试模式）
-LLM_PROVIDER=test EMBEDDING_PROVIDER=test uvicorn app.main:app --port 8001 &
+LLM_PROVIDER=test EMBEDDING_PROVIDER=test .venv/bin/uvicorn app.main:app --port 8001 &
 
 # 2. 运行测试
 python test_e2e.py
@@ -432,7 +434,7 @@ docs/               # 详细架构文档
 | **数据库迁移** | Alembic |
 | **向量数据库** | PGVector（bge-m3 1024d cosine） |
 | **RAG 框架** | LangChain 1.3+ |
-| **混合检索** | rank_bm25（关键词检索）+ jieba（中文分词） |
+| **混合检索** | PG tsvector（默认稀疏后端）/ rank_bm25（内存 BM25 回退）+ jieba（中文分词） |
 | **重排器** | BAAI/bge-reranker-v2-m3（可选，需 transformers + torch） |
 | **认证** | JWT（python-jose）+ bcrypt |
 | **文档解析** | PyPDF, python-docx（docx2txt）, markdown |
