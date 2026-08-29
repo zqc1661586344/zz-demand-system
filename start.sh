@@ -16,7 +16,8 @@ cd "$(dirname "$0")"
 
 echo "=== 启动后端 (端口 8001) ==="
 # 限流默认启用，不想受限可 export RATE_LIMIT_ENABLED=false
-RATE_LIMIT_ENABLED="${RATE_LIMIT_ENABLED:-true}" uvicorn app.main:app --port 8001 &
+# 显式用项目 .venv/bin 下的可执行文件，避免被 base/conda 等其它 Python 环境的 uvicorn 抢走
+RATE_LIMIT_ENABLED="${RATE_LIMIT_ENABLED:-true}" .venv/bin/uvicorn app.main:app --port 8001 &
 BACKEND_PID=$!
 
 # 等待后端就绪
@@ -30,7 +31,7 @@ for i in $(seq 1 30); do
 done
 
 echo "=== 启动 Streamlit 前端 (端口 8002) ==="
-streamlit run app/streamlit_app/app.py --server.port 8002 --server.headless true &
+.venv/bin/streamlit run app/streamlit_app/app.py --server.port 8002 --server.headless true &
 FRONTEND_PID=$!
 
 echo ""

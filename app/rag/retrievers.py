@@ -11,6 +11,7 @@ Usage:
 import json
 import time
 import threading
+from collections import defaultdict
 
 import jieba
 from langchain_core.documents import Document
@@ -279,12 +280,57 @@ def _rebuild_bm25_for_key(key: str, texts: list[str], metadatas: list[dict]) -> 
 # ---------------------------------------------------------------------------
 # Hybrid search — PGVector dense + BM25 sparse → Ensemble (RRF fusion)
 # ---------------------------------------------------------------------------
+def _sparse_docs(query: str, top_k: int, user_id: str | None) -> list[Document]:
+    """按 `rag_sparse_backend` 取回稀疏检索候选（Document 列表，可能为空）。
+
+    - `pg_tsvector`（且 database_url 为 PG）：直接走 `sparse_search.search`，无缓存、读库即最新。
+    - `bm25_memory`，以及 PG tsvector 后端但 database_url 指向 SQLite（不可用）：回退内存 BM25。
+    """
+    if settings.rag_sparse_backend == "pg_tsvector":
+        from app.rag.sparse_search import is_pg_available, search as tsvector_search
+
+        if is_pg_available():
+            return tsvector_search(query, top_k=top_k, user_id=user_id)
+
+    sparse = get_bm25_for_user(user_id)
+    if sparse is None:
+        return []
+    # 不修改 sparse.k —— 它是跨请求共享的缓存单例，改写会在并发下互相覆盖；
+    # 取回量由 [:top_k] 切片统一控制。
+    return sparse.get_relevant_documents(query)[:top_k]
+
+
+def _rrf_fuse(dense: list[Document], sparse: list[Document], alpha: float, c: int = 60) -> list[Document]:
+    """手动的 RRF（Reciprocal Rank Fusion）+ 凸组合权重融合稀疏与稠密结果。
+
+    替代 langchain `EnsembleRetriever`，使 `pg_tsvector` 与 `bm25_memory` 两种稀疏后端
+    走完全相同的融合路径、结果可比。去重键为 `(document_id, page_content)`：
+    - 跨检索器的"同一 chunk"（同文本）折叠为一个 RRF 位置；
+    - 同一文档的不同 chunk（文本不同）保留各自位置，不丢失多 chunk 粒度。
+
+    Returns:
+        已按融合分数降序排列的 Document 列表（保留首次出现的 Document 对象）。
+    """
+    ranked: dict[tuple, tuple[float, Document]] = {}
+    for docs, weight in ((dense, alpha), (sparse, 1.0 - alpha)):
+        for rank, doc in enumerate(docs):
+            key = (str(doc.metadata.get("document_id", "")), doc.page_content)
+            contribution = weight * (1.0 / (c + rank + 1))
+            cur = ranked.get(key)
+            if cur is None:
+                ranked[key] = (contribution, doc)
+            else:
+                ranked[key] = (cur[0] + contribution, doc)
+    ordered = sorted(ranked.values(), key=lambda v: v[0], reverse=True)
+    return [doc for _, doc in ordered]
+
+
 def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Document]:
-    """混合检索：PGVector稠密 + BM25稀疏 → RRF融合（通过EnsembleRetriever）。
+    """混合检索：PGVector稠密 + 稀疏 → RRF融合（支持 pg_tsvector 与内存 BM25 两种稀疏后端）。
 
     【相关性判定策略】
-      - BM25 有数据 → 跳过 cosine spread 检查（关键词命中本身已说明相关）
-      - BM25 无数据 → 回退纯稠密 + spread 检查判断 free_chat
+      - 稀疏有数据 → 跳过 cosine spread 检查（关键词命中本身已说明相关）
+      - 稀疏无数据 → 回退纯稠密 + spread 检查判断 free_chat
 
     Args:
         query: 查询字符串
@@ -297,10 +343,9 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
 
     from app.rag.vector_store import _user_where, get_vector_store, similarity_search_with_relevance
 
-    # 1. 检查 BM25 是否可用（有 BM25 数据 → 跳过 spread 检查）
-    sparse = get_bm25_for_user(user_id)
-    if sparse is None:
-        # 该用户没有 BM25 数据 → 纯稠密，做 spread 判定
+    # 1. 取稀疏候选；无稀疏数据 → 纯稠密，做 spread 判定
+    sparse_docs = _sparse_docs(query, top_k, user_id)
+    if not sparse_docs:
         scored = similarity_search_with_relevance(query, k=min(top_k, 4), user_id=user_id)
         if not scored:
             return []
@@ -322,32 +367,23 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
             }
         ).invoke(query)[:top_k]
 
-    # 2. BM25 有命中 → 无需 spread，直接 ensemble
-    # 注意：不修改 sparse.k —— 它是跨请求共享的缓存单例，改写会在并发下互相覆盖；
-    # 结果数量由最后的 [:top_k] 切片统一控制。
+    # 2. 稀疏有命中 → 无需 spread，稠密+稀疏 RRF 融合
     vs = get_vector_store()
-    dense_retriever = vs.as_retriever(
+    dense_docs = vs.as_retriever(
         search_kwargs={
             "k": top_k,
             "filter": _user_where(user_id),
         }
-    )
-
-    from langchain_classic.retrievers import EnsembleRetriever
-
-    alpha = settings.rag_hybrid_alpha
-    docs = EnsembleRetriever(
-        retrievers=[dense_retriever, sparse],
-        weights=[alpha, 1.0 - alpha],
-        c=60,
     ).invoke(query)
 
-    # 【相关性门控】ensemble可能因BM25的关键词命中而返回文档，但余弦分数仍可能很低（无关查询）。用k=1的 cosine 分数做最终把关，低于rag_min_score → free chat，只多一次轻量查询，不做 spread。
+    docs = _rrf_fuse(dense_docs, sparse_docs, settings.rag_hybrid_alpha)
+
+    # 【相关性门控】融合可能因稀疏关键词命中而返回文档，但余弦分数仍可能很低（无关查询）。用k=1的 cosine 分数做最终把关，低于rag_min_score → free chat，只多一次轻量查询，不做 spread。
     if docs:
         scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
         if not scored or scored[0][1] < settings.rag_min_score:
             logger.info(
-                "hybrid BM25 path but cosine top-1=%.3f below min_score=%.3f → free chat",
+                "hybrid path but cosine top-1=%.3f below min_score=%.3f → free chat",
                 scored[0][1] if scored else 0,
                 settings.rag_min_score,
             )

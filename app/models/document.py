@@ -53,6 +53,10 @@ class DocumentChunk(Base):
     document_id = Column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False)
     chunk_index = Column(Integer, nullable=False)
     content = Column(Text, nullable=False)
+    # jieba 分词后的空格串（中文按词切分，英文按空白切分）。供 PG tsvector 稀疏检索使用
+    # （to_tsvector('simple', search_text) 上的 GIN 表达式索引）。为 NULL 表示该 chunk 尚未
+    # 建立搜索文本；SQLite 开发环境无 PG GIN 索引，稀疏检索会回退内存 BM25。
+    search_text = Column("search_text", Text, nullable=True)
     page_number = Column(Integer, nullable=True)
     meta_json = Column("meta", Text, nullable=True)  # JSON string
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

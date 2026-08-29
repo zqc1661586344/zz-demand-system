@@ -48,6 +48,10 @@ async def lifespan(app: FastAPI):
     _configure_logging()
     init_db()
     _seed_demo_user()
+    # 为 document_chunks.search_text 建 PG tsvector GIN 索引（仅 PG，幂等）
+    from app.rag.sparse_search import ensure_fts_index
+
+    ensure_fts_index()
     # 恢复因异常退出而卡在 "processing" 状态的文档
     _recover_stuck_documents()
     yield

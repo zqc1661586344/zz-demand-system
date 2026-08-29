@@ -152,6 +152,7 @@ query
 ```
 RAG_SEARCH_TYPE=hybrid         # similarity / mmr / hybrid（默认）
 RAG_HYBRID_ALPHA=0.5          # 稠密 vs 稀疏权重（0=纯BM25, 1=纯向量）
+RAG_SPARSE_BACKEND=pg_tsvector # 稀疏后端：pg_tsvector（默认，PG tsvector+GIN，增量零内存）/ bm25_memory（进程内BM25，全量载内存，SQLite回退）
 RAG_RERANK_ENABLED=false       # 是否启用重排器（需额外安装依赖）
 RAG_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RAG_RERANK_TOP_N=5
@@ -161,4 +162,4 @@ RAG_RERANK_TOP_N=5
 
 - **生产部署注意**：gunicorn（`-k uvicorn.workers.UvicornWorker`）在部分 gunicorn/uvicorn 版本组合下会 `Worker failed to boot / code 3`，已验证**用单进程 `uvicorn` 后台跑最稳**（命令见上「常用命令」）；多进程/自启用 systemd 前需先核对 gunicorn 与 uvicorn 版本。
 - `app/rag/llms.py`、`embeddings.py` 里 `provider == "local"` 分支实际未启用（配置枚举只允许 `openai`/`ollama`/`test`）。
-- BM25 索引是全量重建（非增量），文档量大时可能成为性能瓶颈，后续可改为增量更新。
+- 稀疏检索默认走 **PG tsvector**（`RAG_SPARSE_BACKEND=pg_tsvector`，增量、零内存）；仅当配置回退 `bm25_memory` 时，内存 BM25 才是**全量重建（非增量）**，文档量大时可能成为性能瓶颈。tsvector 后端已规避该问题。

@@ -11,7 +11,7 @@ from app.database import SessionLocal
 from app.logging_config import get_logger
 from app.models.document import Document as DocModel
 from app.models.document import DocumentChunk
-from app.rag.retrievers import mark_bm25_data_changed, refresh_bm25_for_user
+from app.rag.retrievers import _chinese_tokenizer, mark_bm25_data_changed, refresh_bm25_for_user
 from app.rag.splitters import get_default_splitter
 from app.rag.vector_store import add_documents_to_store, delete_documents_from_store
 from app.services.document_service import update_document_status
@@ -122,6 +122,8 @@ def process_document(doc_id: str) -> None:
                 document_id=str(doc.id),
                 chunk_index=i,
                 content=chunk.page_content,
+                # jieba 分词空格串：供 PG tsvector 稀疏检索（to_tsvector('simple', ...)）
+                search_text=" ".join(_chinese_tokenizer(chunk.page_content)),
                 page_number=chunk.metadata.get("page"),
                 meta_json=json.dumps(chunk.metadata, ensure_ascii=False),
             )

@@ -76,6 +76,11 @@ class Settings(BaseSettings):
     # Hybrid RAG 稠密向量 vs 稀疏关键词权重（0=纯BM25, 1=纯向量）
     rag_hybrid_alpha: float = 0.5
 
+    # 稀疏检索后端：bm25_memory（进程内 BM25，全量载入内存）/ pg_tsvector（PG 原生
+    # tsvector + ts_rank + GIN，增量、零内存驻留）。
+    # 仅当 database_url 指向 PostgreSQL 时才可用 pg_tsvector；SQLite 环境自动回退 bm25_memory。
+    rag_sparse_backend: Literal["bm25_memory", "pg_tsvector"] = "pg_tsvector"
+
     # Hybrid 检索时稠密分数的离散度下限：top-1 与 top-2 的分数差低于此值，
     # 说明检索结果没有区分度（平带），判定为 query 与文档集无关，回退 free chat。
     # bge-m3 的分数被压缩在窄区间内，不相关的 query 也会打出 0.44~0.50 的分数，
