@@ -88,8 +88,9 @@ class Settings(BaseSettings):
     rag_hybrid_min_spread: float = 0.015
 
     # 稀疏检索（pg_tsvector 后端）的 ts_rank 下限：低于此值的"命中"视为弱命中，
-    # 在 hybrid 稀疏命中分支被过滤掉，防止仅靠个别泛词共现的无关 chunk 混入 RRF。
-    # 该阈值仅作用于 pg_tsvector 后端（其 SQL 算出的 ts_rank r）；bm25_memory 回退不加下限。
+    # 在 SQL WHERE 用归一化 ts_rank(..., 1) 直接过滤掉，防止仅靠个别泛词共现的无关 chunk 混入 RRF。
+    # 阈值作用于归一化尺度（与 SELECT 透出的 r / hybrid 一致），仅在 pg_tsvector 后端生效；
+    # bm25_memory 回退不加下限。
     rag_sparse_min_rank: float = 0.1
 
     # 是否启用 bge-reranker 交叉编码器重排（需 transformers + torch）

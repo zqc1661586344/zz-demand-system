@@ -122,7 +122,7 @@ def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Docum
         CROSS JOIN (SELECT plainto_tsquery('simple', :q_str) AS ts) AS q
         WHERE c.search_text IS NOT NULL
           AND to_tsvector('simple', c.search_text) @@ q.ts  -- 仅返回真正命中关键词的行（无关查询为空）
-          AND ts_rank(to_tsvector('simple', c.search_text), q.ts) > :min_rank  -- 过滤弱命中
+          AND ts_rank(to_tsvector('simple', c.search_text), q.ts, 1) > :min_rank  -- 过滤弱命中（与 SELECT 的 r 同为归一化尺度）
           AND d.status = 'indexed'                           -- 跳过 failed/pending 等未完成文档的 chunk
           AND {where}
         ORDER BY r DESC NULLS LAST
@@ -151,7 +151,8 @@ def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Docum
         # 统一 metadata：让稀疏结果的 document_id/源信息与稠密结果对齐，便于 RRF 去重。
         meta.setdefault("chunk_id", row["chunk_id"])
         meta.setdefault("content", row["content"])
-        # 稀疏质量分：SQL 里算出的 ts_rank r，供 hybrid_search 在 RRF 融合前做下限把关。
+        # 稀疏质量分：SQL 里算出的归一化 ts_rank r（与 WHERE 把关同一尺度）。
+        # 把关已在 SQL WHERE 完成，此分仅透出供日志/调试，hybrid 不再重复过滤。
         meta.setdefault("sparse_score", row["r"])
         results.append(Document(page_content=row["content"], metadata=meta))
 
