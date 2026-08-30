@@ -364,11 +364,9 @@ SUMMARY_PROMPT = ChatPromptTemplate.from_messages(
         (
             "system",
             (
-                "You are an expert at conversation summarization. "
-                "Read the following conversation between a User and an Assistant, "
-                "and produce a concise summary that captures all key information: "
-                "facts the user has mentioned, questions asked, and answers given. "
-                "Keep the summary to 3-5 sentences."
+                "你是一名对话摘要专家。请阅读下面的用户与助手之间的对话，"
+                "并产出一份简洁的摘要，覆盖所有关键信息：用户提到的要点、提出的问题，"
+                "以及给出的回答。将摘要控制在 3-5 句话。"
             ),
         ),
         ("human", "{conversation}"),

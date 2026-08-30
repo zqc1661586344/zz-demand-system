@@ -22,9 +22,9 @@ def _seed_demo_user():
     生产环境永远不创建；默认 development 也不创建（避免在内网/云部署时自动种出硬编码超管）。
     需要时临时设 SEED_DEMO_USER=true 启动一次，登录后改密并关闭开关，详见 README。
     """
-    if not settings.seed_demo_user:
-        return
     if settings.environment == "production":
+        return
+    if not settings.seed_demo_user:
         return
     db: Session = SessionLocal()
     try:
