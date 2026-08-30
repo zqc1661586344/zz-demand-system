@@ -48,7 +48,7 @@ def format_sources(docs: list) -> list[dict]:
     return sources
 
 
-_CITATION_RE = re.compile(r"\[来源\s*(\d+)\]")
+_CITATION_RE = re.compile(r"\[(?:来源|Source)\s*(\d+)\]")
 
 
 def sanitize_citations(answer: str, sources: list[dict]) -> str:
@@ -151,17 +151,48 @@ CONTEXTUALIZE_Q_SYSTEM = (
 )
 
 # 指代词：出现在问题中即视为可能依赖上下文，需要改写
-_REFERENTIAL_MARKERS = ("它", "这个", "那个", "这些", "那些", "上述", "上面", "刚才", "之前", "第二点", "那")
-
-# 疑问词：自包含问题通常含疑问词且无指代
-_QUESTION_WORDS = ("什么", "怎么", "如何", "为什么", "哪", "几", "多少", "是否", "能不能", "是谁", "哪些")
+_REFERENTIAL_MARKERS = (
+    "它",
+    "这个",
+    "那个",
+    "这些",
+    "那些",
+    "上述",
+    "上面",
+    "刚才",
+    "之前",
+    "第二点",
+)
+# 自包含判定：无指代词时，问题长度达到该阈值即视为自包含（含疑问词的命令句/陈述句）
+_SELF_CONTAINED_MIN_LEN = 6
 
 
 def _is_self_contained(query: str) -> bool:
-    """判断问题是否明显自包含（含疑问词且无指代词），跳过改写以省一次 LLM 往返。"""
-    if not any(w in query for w in _QUESTION_WORDS):
+    """判断问题是否明显自包含，需改写则返回 False。
+
+    自包含 = 不含指代词，且（含疑问词 或 长度足够）——覆盖"介绍/列出/比较"等
+    无疑问词的命令句与陈述句，避免每一轮都对自包含问题触发一次额外 LLM 改写。
+    仍保留「有疑问词但带指代 → 需要改写」的判定（如"那个方案呢"）。
+    """
+    has_marker = any(m in query for m in _REFERENTIAL_MARKERS)
+    if has_marker:
         return False
-    return not any(m in query for m in _REFERENTIAL_MARKERS)
+    return (len(query.strip()) >= _SELF_CONTAINED_MIN_LEN) or any(
+        w in query for w in _QUESTION_WORDS
+    )
+
+
+# 改写 LLM 复用缓存（与 build_rag_chain 同模式），避免每轮改写都新建实例
+_rewrite_llm = None
+
+
+def _get_rewrite_llm():
+    global _rewrite_llm
+    if _rewrite_llm is None:
+        with _chain_lock:
+            if _rewrite_llm is None:
+                _rewrite_llm = get_llm()
+    return _rewrite_llm
 
 
 def _rewrite_query(
@@ -171,16 +202,16 @@ def _rewrite_query(
     if not history or _is_self_contained(query):
         return query
     try:
-        messages: list[tuple[str, str]] = [
-            ("system", CONTEXTUALIZE_Q_SYSTEM),
-            ("system", f"[更早对话摘要（仅参考）]\n{summary}"),
-        ]
+        messages: list[tuple[str, str]] = [("system", CONTEXTUALIZE_Q_SYSTEM)]
+        # 仅当存在更早摘要时才注入，避免 summary=None 时出现字面量 "None"
+        if summary:
+            messages.append(("system", f"[更早对话摘要（仅参考）]\n{summary}"))
         for msg in history[-6:]:  # 改写只需最近几轮，避免塞入过长老历史
             role = "user" if msg.get("role") == "user" else "assistant"
             messages.append((role, msg.get("content", "")))
         messages.append(("human", query))
         prompt = ChatPromptTemplate.from_messages(messages)
-        chain = prompt | get_llm() | StrOutputParser()
+        chain = prompt | _get_rewrite_llm() | StrOutputParser()
         rewritten = chain.invoke({})
         return (rewritten or query).strip() or query
     except Exception:

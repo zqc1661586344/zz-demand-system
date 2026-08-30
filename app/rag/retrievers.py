@@ -342,8 +342,9 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
     """混合检索：PGVector稠密 + 稀疏 → RRF融合（支持 pg_tsvector 与内存 BM25 两种稀疏后端）。
 
     【相关性判定策略】
-      - 稀疏有数据 → 跳过 cosine spread 检查（关键词命中本身已说明相关）
-      - 稀疏无数据 → 回退纯稠密 + spread 检查判断 free_chat
+      - 稀疏有数据且 ts_rank ≥ rag_sparse_min_rank → 关键词真命中，跳过 spread，稠密+稀疏 RRF 融合
+      - 稀疏为空（或 ts_rank 过滤后为空）→ 回退纯稠密 + spread 检查判断 free_chat
+      - 融合后仅当稠密侧对该 query 完全零相关（向量库空）才回退 free chat
 
     Args:
         query: 查询字符串
@@ -380,7 +381,37 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
             }
         ).invoke(query)[:top_k]
 
-    # 2. 稀疏有命中 → 无需 spread，稠密+稀疏 RRF 融合
+    # 2. 稀疏有命中 → 无需 spread，稠密+稀疏 RRF 融合。
+    #    先用稀疏质量分（ts_rank）过滤弱命中：仅 pg_tsvector 后端带 sparse_score，
+    #    bm25_memory 回退无该分，保持原行为（不加下限）。
+    if settings.rag_sparse_backend == "pg_tsvector":
+        sparse_docs = [
+            d
+            for d in sparse_docs
+            if d.metadata.get("sparse_score", 0.0) >= settings.rag_sparse_min_rank
+        ]
+
+    # 过滤后稀疏侧为空 → 等同于"稀疏无命中"，回到纯稠密分支
+    if not sparse_docs:
+        scored = similarity_search_with_relevance(query, k=min(top_k, 4), user_id=user_id)
+        if not scored:
+            return []
+        top1, spread = scored[0][1], (scored[0][1] - scored[1][1] if len(scored) >= 2 else 1.0)
+        if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
+            logger.info(
+                "sparse filtered to empty; dense-only top-1=%.3f spread=%.3f → free chat",
+                top1,
+                spread,
+            )
+            return []
+        vs = get_vector_store()
+        return vs.as_retriever(
+            search_kwargs={
+                "k": top_k,
+                "filter": _user_where(user_id),
+            }
+        ).invoke(query)[:top_k]
+
     vs = get_vector_store()
     dense_docs = vs.as_retriever(
         search_kwargs={
@@ -391,9 +422,9 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
 
     docs = _rrf_fuse(dense_docs, sparse_docs, settings.rag_hybrid_alpha)
 
-    # 【相关性门控】问题1修复后，稀疏侧返回的都是确凿命中（`@@` 过滤保证无关查询为空）。
-    # 这里不再用 k=1 cosine 一刀切（那会误杀"关键词命中但 bge-m3 余弦低"的正确结果）；
-    # 只做一次轻量 cosine 佐证：当稠密侧对该 query 完全零相关（not scored）才判定 free chat。
+    # 【相关性兜底】稀疏侧已用 ts_rank 下限把关（真命中才进融合），此处只保留库空兜底：
+    # 当稠密侧对该 query 完全零相关（向量库空/embedding 失败，not scored）才判定 free chat。
+    # 不再用 k=1 cosine 一刀切，避免误杀"关键词真命中但 bge-m3 余弦低"的正确结果。
     if docs:
         scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
         if not scored:

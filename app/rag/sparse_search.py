@@ -31,13 +31,40 @@ def is_pg_available() -> bool:
     return settings.database_url.startswith("postgres")
 
 
+# 查询侧停用词：过滤后不作为 `websearch_to_tsquery` 的必需 AND 词，避免长 query 召回偏低。
+# 仅作用于查询侧；索引侧 search_text 保留全词，避免改索引破坏既有 GIN 命中。
+_STOP_WORDS = {
+    "的",
+    "了",
+    "有",
+    "哪些",
+    "什么",
+    "怎么",
+    "如何",
+    "是",
+    "在",
+    "和",
+    "及",
+    "或",
+    "这",
+    "那",
+    "与",
+    "等",
+}
+
+
 def tokenize_query(query: str) -> str:
-    """对查询做与索引一致的 jieba 分词，空格 join。
+    """对查询做与索引一致的 jieba 分词并过滤停用词，空格 join。
 
     索引侧存储的是 `" ".join(_chinese_tokenizer(content))`，查询侧必须用同样的分词，
     否则 `simple` 全文配置下中文字符会被当作一个整体、无法与已切好的词条精确匹配。
+    停用词过滤能避免 `websearch_to_tsquery` 的 AND 语义下泛词拖低长 query 召回。
     """
-    return " ".join(_chinese_tokenizer(query))
+    return " ".join(
+        t
+        for t in _chinese_tokenizer(query)
+        if t.strip().lower() not in _STOP_WORDS
+    )
 
 
 def ensure_fts_index() -> None:
@@ -95,13 +122,14 @@ def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Docum
         CROSS JOIN (SELECT plainto_tsquery('simple', :q_str) AS ts) AS q
         WHERE c.search_text IS NOT NULL
           AND to_tsvector('simple', c.search_text) @@ q.ts  -- 仅返回真正命中关键词的行（无关查询为空）
+          AND ts_rank(to_tsvector('simple', c.search_text), q.ts) > :min_rank  -- 过滤弱命中
           AND d.status = 'indexed'                           -- 跳过 failed/pending 等未完成文档的 chunk
           AND {where}
         ORDER BY r DESC NULLS LAST
         LIMIT :k
         """
     )
-    params: dict = {"q_str": ts_query, "k": top_k}
+    params: dict = {"q_str": ts_query, "k": top_k, "min_rank": settings.rag_sparse_min_rank}
     if user_id is not None:
         params["uid"] = user_id
 
@@ -123,6 +151,8 @@ def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Docum
         # 统一 metadata：让稀疏结果的 document_id/源信息与稠密结果对齐，便于 RRF 去重。
         meta.setdefault("chunk_id", row["chunk_id"])
         meta.setdefault("content", row["content"])
+        # 稀疏质量分：SQL 里算出的 ts_rank r，供 hybrid_search 在 RRF 融合前做下限把关。
+        meta.setdefault("sparse_score", row["r"])
         results.append(Document(page_content=row["content"], metadata=meta))
 
     logger.info(

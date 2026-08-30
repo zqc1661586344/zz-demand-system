@@ -131,11 +131,16 @@ def process_document(doc_id: str) -> None:
         db.commit()
         logger.info(f"persisted {len(chunks)} chunks to document_chunks for doc {doc_id}")
 
-        # 存入向量数据库
-        add_documents_to_store(chunks)
-
-        # 更新数据库状态为indexed
-        update_document_status(db, doc_id, "indexed", chunk_count=len(chunks))
+        # 存入向量数据库，成功后置 indexed。
+        # 若向量写入失败（重试也无望），清理刚落库的 chunk，避免 failed 文档的可检索
+        # 内容残留在 document_chunks 中；异常重新抛出交由外层置 failed / Celery 重试。
+        try:
+            add_documents_to_store(chunks)
+            update_document_status(db, doc_id, "indexed", chunk_count=len(chunks))
+        except Exception:
+            db.query(DocumentChunk).filter(DocumentChunk.document_id == str(doc.id)).delete()
+            db.commit()
+            raise
         logger.info(f"document {doc_id}: indexed {len(chunks)} chunks")
 
         # 文档数据变更：先广播数据版本号（使所有 worker 的相关缓存失效），

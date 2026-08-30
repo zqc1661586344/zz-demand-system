@@ -54,7 +54,14 @@ def process_document_task(self, doc_id: str) -> dict:
     # 不可重试的异常（ValueError、FileNotFoundError）不重试
     try:
         _process_document(doc_id)
-        return {"status": "indexed", "doc_id": doc_id}
+        # 任务执行完，回查 DB 真实状态作为返回值（pipeline 内部可能吞掉非重试异常置 failed，
+        # 直接返回 "indexed" 会与 DB 实际状态矛盾，造成监控/告警失真）。
+        db = SessionLocal()
+        try:
+            st = db.query(Document.status).filter(Document.id == doc_id).scalar()
+        finally:
+            db.close()
+        return {"status": st or "unknown", "doc_id": doc_id}
     except (ValueError, FileNotFoundError) as exc:
         logger.error("non-retryable error processing %s: %s", doc_id, exc)
         # 标记为 failed，不重试

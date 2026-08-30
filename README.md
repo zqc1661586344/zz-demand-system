@@ -129,6 +129,7 @@ bash start.sh
 | `RAG_SEARCH_TYPE` | 否 | `hybrid` | 检索模式：`similarity`（纯向量）/ `mmr`（多样性）/ `hybrid`（BM25+向量+RRF 融合） |
 | `RAG_HYBRID_ALPHA` | 否 | `0.5` | Hybrid 中稠密 vs 稀疏权重（0=纯 BM25，1=纯向量） |
 | `RAG_SPARSE_BACKEND` | 否 | `pg_tsvector` | 稀疏检索后端：`pg_tsvector`（PG 原生 tsvector+GIN，增量零内存，默认）/ `bm25_memory`（进程内 BM25，回退） |
+| `RAG_SPARSE_MIN_RANK` | 否 | `0.1` | pg_tsvector 稀疏命中的 ts_rank 下限：低于此值视为弱命中，在 hybrid 稀疏分支被过滤 |
 | `RAG_HYBRID_MIN_SPREAD` | 否 | `0.015` | Hybrid 模式的分数离散度阈值：top1-top2 低于此值回退自由聊天 |
 | `RAG_MIN_SCORE` | 否 | `0.4` | 纯向量模式的相关性分数阈值（低于此值回退自由聊天） |
 | `RAG_RERANK_ENABLED` | 否 | `false` | 是否启用 bge-reranker 交叉编码器重排（需 transformers + torch） |

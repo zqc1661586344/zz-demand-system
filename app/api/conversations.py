@@ -220,8 +220,18 @@ def _save_messages_background(conv_id: str, answer: str, sources: list, free_cha
     """
     db = SessionLocal()
     try:
+        # 落库前剔除越界/错乱的 `[来源 N]`/`[Source N]` 引用，保证存库与前端一致
+        # （前端流式已按 token 渲染，前端展示不再改，这里只保证存库干净）。
+        from app.rag.chain import sanitize_citations
+
+        clean_answer = sanitize_citations(answer, sources or [])
         add_message(
-            db, conv_id, role="assistant", content=answer, sources=sources, free_chat=free_chat
+            db,
+            conv_id,
+            role="assistant",
+            content=clean_answer,
+            sources=sources,
+            free_chat=free_chat,
         )
         db.commit()
     except Exception as e:

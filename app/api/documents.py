@@ -70,29 +70,39 @@ async def upload_document(
 
     ext = mime_to_ext[mime_type]
 
-    # 上传文档存盘
+    # 上传文档存盘 —— 按块流式落盘，避免单个大文件整体读入内存
     os.makedirs(settings.upload_path, exist_ok=True)
     stored_name = f"{uuid.uuid4().hex}{ext}"
     file_path = settings.upload_path / stored_name
     logger.info(f"file_path: {file_path}")
 
-    content = await file.read()
     max_bytes = settings.max_upload_size_mb * 1024 * 1024
-    if len(content) > max_bytes:
-        raise HTTPException(
-            status_code=413,
-            detail=f"文件超过 {settings.max_upload_size_mb}MB 大小限制",
-        )
-
-    with open(file_path, "wb") as f:
-        f.write(content)
+    written = 0
+    try:
+        with open(file_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)  # 1MB 块
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > max_bytes:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"文件超过 {settings.max_upload_size_mb}MB 大小限制",
+                    )
+                f.write(chunk)
+    except HTTPException:
+        # 超限后清理已写部分，避免残留半截文件
+        if file_path.exists():
+            file_path.unlink()
+        raise
 
     # 文档信息存入数据库
     doc = create_document(
         db=db,
         filename=stored_name,
         original_filename=file.filename or stored_name,
-        file_size=len(content),
+        file_size=written,
         mime_type=mime_type,
         uploaded_by=current_user.id,
         visibility=visibility,
