@@ -18,6 +18,10 @@ class Settings(BaseSettings):
     # 运行环境：development / production
     environment: Literal["development", "production"] = "development"
 
+    # 启动时种子 admin(admin/admin123) 账号：默认关闭。仅开发/测试临时开启；
+    # 生产与默认配置都不创建，杜绝硬编码超管凭据入库。首次 bootstrap 见 README。
+    seed_demo_user: bool = False
+
     # App信息配置
     app_name: str = "Enterprise RAG System"
     app_debug: bool = True

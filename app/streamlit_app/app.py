@@ -22,9 +22,10 @@ if _proj_root not in sys.path:
 import streamlit as st
 
 from app.logging_config import get_logger
-from app.streamlit_app.auth import auto_login
+from app.streamlit_app.auth import logout
 from app.streamlit_app.views.chat import new_conversation, page as chat_page
 from app.streamlit_app.views.documents import page as documents_page
+from app.streamlit_app.views.login import page as login_page
 
 logger = get_logger(__name__)
 
@@ -36,11 +37,10 @@ def main():
         layout="wide",
     )
 
-    # Auto-login on every load
-    if "authenticated" not in st.session_state:
-        if not auto_login():
-            st.error("自动登录失败，请确认后端服务已启动（端口 8001）")
-            st.stop()
+    # 入口守卫：未认证只渲染登录/注册页，不进入任何业务页面
+    if not st.session_state.get("authenticated"):
+        login_page()
+        st.stop()
 
     # Page selection persisted in URL query param (?page=chat|docs) so that
     # browser refresh (F5) keeps the user on the same page instead of resetting
@@ -57,6 +57,9 @@ def main():
 
     with st.sidebar:
         st.markdown(f"👤 **{st.session_state.get('username', '用户')}**")
+        if st.button("退出登录", use_container_width=True):
+            logout()
+            st.rerun()
         st.divider()
 
         choice = st.radio(

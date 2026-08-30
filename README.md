@@ -152,6 +152,29 @@ bash start.sh
 
 > 新注册用户自动分配 `viewer` 角色，由 admin 在"管理"页面调整。
 
+### 首次登录 & 首个 admin
+
+前端默认展示**登录/注册页**，不再硬编码自动登录。注册用户默认 `viewer`；首个 `admin` 需手动种出：
+
+> 项目默认 `SEED_DEMO_USER=false`，**不会自动创建任何 admin 账号**（杜绝硬编码超管凭据入库）。全新库拿第一个 admin 的方式：
+
+```bash
+# 临时开启种子开关，启动一次种出 admin/admin123
+SEED_DEMO_USER=true bash start.sh
+
+# → 用 admin / admin123 登录
+# → 立即改密：POST /api/auth/change-password（见下）或在 UI 引导（若已提供）
+curl -X POST http://localhost:8001/api/auth/change-password \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"old_password":"admin123","new_password":"<强密码>"}'
+
+# → 重启（不带 SEED_DEMO_USER），开关关闭后不再重建，后续凭新密码登录
+bash start.sh
+```
+
+> 生产环境无论开关如何都**不**种 admin（`main.py::_seed_demo_user` 有生产守卫）。
+
 ### 工作流程
 
 ```mermaid
