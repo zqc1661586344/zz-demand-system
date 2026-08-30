@@ -29,13 +29,25 @@ def _set_auth_session(data: dict, user_info: dict | None = None) -> None:
 
 
 def _fetch_me(token: str) -> dict:
-    """用 access token 拉取当前用户信息（/api/auth/me）。失败返回空 dict，不阻断登录。"""
-    with httpx.Client(base_url=BASE_URL, timeout=10.0) as http:
-        resp = http.get(
-            "/api/auth/me",
-            headers={"Authorization": f"Bearer {token}"},
-        )
-        return resp.json() if resp.status_code == 200 else {}
+    """用 access token 拉取当前用户信息（/api/auth/me）。
+
+    失败（非 200、JSON 解析失败、网络异常）返回空 dict，**不向上抛异常**，
+    避免让一次本该成功的登录/注册因"拉 user_info"这个小步骤失败而被误判为整体失败。
+    """
+    try:
+        with httpx.Client(base_url=BASE_URL, timeout=10.0) as http:
+            resp = http.get(
+                "/api/auth/me",
+                headers={"Authorization": f"Bearer {token}"},
+            )
+            if resp.status_code != 200:
+                logger.info("fetch /me failed: status=%s", resp.status_code)
+                return {}
+            return resp.json()
+    except Exception as e:
+        # 网络异常 / JSON 解析失败：仅记录，不阻断登录
+        logger.warning("fetch /me failed: %s", e)
+        return {}
 
 
 def login(username: str, password: str) -> bool:
@@ -78,7 +90,8 @@ def register(username: str, password: str, email: str = "", full_name: str = "")
             if resp.status_code != 201:
                 # 透出后端 detail（如 "Username already exists"）供前端展示
                 try:
-                    detail = resp.json().get("detail", resp.text)
+                    raw = resp.json().get("detail", resp.text)
+                    detail = raw if isinstance(raw, str) else str(raw)  # 422 的 detail 是列表
                 except Exception:
                     detail = resp.text
                 st.session_state["register_error"] = detail

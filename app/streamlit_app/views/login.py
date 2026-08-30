@@ -44,8 +44,17 @@ def page() -> None:
             st.error(st.session_state.pop("register_error"))
 
         if st.button("注册", use_container_width=True):
+            # 与后端 RegisterRequest(app/schemas/auth.py) 对齐的长度校验，先于后端 422 做即时提示
             if not reg_username or not reg_password:
                 st.error("用户名和密码为必填项")
+            elif not (3 <= len(reg_username) <= 32):
+                st.error("用户名长度需在 3~32 个字符之间")
+            elif not (6 <= len(reg_password) <= 128):
+                st.error("密码长度需在 6~128 个字符之间")
+            elif reg_email and len(reg_email) > 128:
+                st.error("邮箱长度不能超过 128 个字符")
+            elif reg_full_name and len(reg_full_name) > 64:
+                st.error("姓名长度不能超过 64 个字符")
             elif reg_password != reg_confirm:
                 st.error("两次输入的密码不一致")
             elif register(reg_username, reg_password, reg_email, reg_full_name):

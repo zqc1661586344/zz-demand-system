@@ -1,6 +1,6 @@
 """Auth-related Pydantic schemas."""
 
-from pydantic import BaseModel, EmailStr
+from pydantic import BaseModel, EmailStr, Field
 
 
 class LoginRequest(BaseModel):
@@ -9,10 +9,10 @@ class LoginRequest(BaseModel):
 
 
 class RegisterRequest(BaseModel):
-    username: str
-    password: str
-    email: str
-    full_name: str | None = None
+    username: str = Field(..., min_length=3, max_length=32)
+    password: str = Field(..., min_length=6, max_length=128)
+    email: str = Field("", max_length=128)
+    full_name: str | None = Field(None, max_length=64)
 
 
 class TokenResponse(BaseModel):
