@@ -50,12 +50,16 @@ def ensure_fts_index() -> None:
     SQLite 环境直接返回。
     """
     if not is_pg_available():
-        logger.info("database_url is not PostgreSQL — skip FTS GIN index (%s)", settings.database_url)
+        logger.info(
+            "database_url is not PostgreSQL — skip FTS GIN index (%s)", settings.database_url
+        )
         return
     try:
         with engine.begin() as conn:
             # 1) 保证 search_text 列存在（旧库可能没有此列，create_all 不会给已存在表补列）
-            conn.execute(text("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS search_text TEXT"))
+            conn.execute(
+                text("ALTER TABLE document_chunks ADD COLUMN IF NOT EXISTS search_text TEXT")
+            )
             # 2) 建 GIN 表达式索引（已存在则跳过）
             conn.execute(
                 text(
@@ -85,11 +89,14 @@ def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Docum
     sql = text(
         f"""
         SELECT c.id AS chunk_id, c.content, c.meta,
-               ts_rank(to_tsvector('simple', c.search_text), q.ts) AS r
+               ts_rank(to_tsvector('simple', c.search_text), q.ts, 1) AS r
         FROM document_chunks c
         JOIN documents d ON d.id = c.document_id
-        CROSS JOIN (SELECT websearch_to_tsquery('simple', :q_str) AS ts) AS q
-        WHERE c.search_text IS NOT NULL AND {where}
+        CROSS JOIN (SELECT plainto_tsquery('simple', :q_str) AS ts) AS q
+        WHERE c.search_text IS NOT NULL
+          AND to_tsvector('simple', c.search_text) @@ q.ts  -- 仅返回真正命中关键词的行（无关查询为空）
+          AND d.status = 'indexed'                           -- 跳过 failed/pending 等未完成文档的 chunk
+          AND {where}
         ORDER BY r DESC NULLS LAST
         LIMIT :k
         """

@@ -1,6 +1,6 @@
 # Enterprise RAG System
 
-> **企业级 RAG 文档问答系统** — 基于 FastAPI + LangChain + Streamlit + PostgreSQL(pgvector) 构建
+> **企业级 RAG 文档问答系统** — 基于 FastAPI + LangChain + Streamlit + PostgreSQL(PGVector) 构建
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
@@ -179,7 +179,7 @@ flowchart LR
 
 ```mermaid
 flowchart TD
-    Q["用户提问"] --> H["组装对话历史（最近 5 轮 + 更早摘要）"]
+    Q["用户提问"] --> H["组装对话历史（最近 20 轮 + 更早摘要）"]
     H --> D{"检索模式 RAG_SEARCH_TYPE"}
     D -->|hybrid| DH["PGVector 稠密检索<br/>bge-m3 cosine"]
     D -->|hybrid| SH["稀疏检索<br/>PG tsvector + jieba 分词<br/>或内存 BM25"]

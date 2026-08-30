@@ -33,6 +33,9 @@ _bm25_map: dict[str, "BM25Retriever | None"] = {}  # key: user_id or "__all__"
 _bm25_ts_map: dict[str, float] = {}  # Redis timestamp snapshot per key
 _bm25_lock = threading.RLock()
 _BM25_LRU_MAX = 500  # 进程内 LRU 缓存上限，防止内存无限增长
+# 配了 Redis 但读不到数据版本号（TS 过期/从未标记）时的本地兜底 TTL（秒）：
+# 该窗口内复用最近一次重建的索引，避免 fail-closed 导致每次查询都全量重建。
+_BM25_LOCAL_TTL = 300
 # "加载中"标记：防止 TOCTOU 竞态下多个线程同时重建同一用户的 BM25 索引
 _LOADING: "BM25Retriever | None" = object()  # type: ignore[assignment]
 
@@ -119,6 +122,7 @@ def refresh_bm25_for_user(user_id: str) -> None:
             .join(Document, DocumentChunk.document_id == Document.id)
             .filter(
                 (Document.uploaded_by == user_id) | (Document.visibility == "shared"),
+                Document.status == "indexed",  # 与 pg_tsvector 一致：跳过 failed/pending 文档的 chunk
                 DocumentChunk.content.isnot(None),
             )
             .all()
@@ -133,13 +137,18 @@ def refresh_bm25_for_user(user_id: str) -> None:
 
 
 def refresh_bm25_all() -> None:
-    """从document_chunks读取全部文档，重建全量 BM25（供 superuser "__all__" 使用）。"""
+    """从document_chunks读取全部已索引文档，重建全量 BM25（供 superuser "__all__" 使用）。"""
     from app.database import SessionLocal
-    from app.models.document import DocumentChunk
+    from app.models.document import Document, DocumentChunk
 
     db = SessionLocal()
     try:
-        chunks = db.query(DocumentChunk).filter(DocumentChunk.content.isnot(None)).all()
+        chunks = (
+            db.query(DocumentChunk)
+            .join(Document, DocumentChunk.document_id == Document.id)
+            .filter(Document.status == "indexed", DocumentChunk.content.isnot(None))
+            .all()
+        )
         texts = [c.content for c in chunks]
         metadatas = [json.loads(c.meta_json) if c.meta_json else {} for c in chunks]
 
@@ -222,9 +231,13 @@ def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
                 # 未配置 Redis/Celery：纯本地缓存模式（None 空索引也是合法缓存值）
                 if not settings.celery_broker_url:
                     return cached
-                # 配置了 Redis 但读不到版本号 → fail-closed：视为已失效，清空缓存并重建
-                _bm25_map.pop(key, None)
-                _bm25_ts_map.pop(key, None)
+                # 配置了 Redis 但读不到版本号（TS 过期 / 该 key 从未被标记）：
+                # 用本地时间戳做短 TTL 兜底，避免 fail-closed 导致每次查询都全量重建。
+                # 索引只要在 _BM25_LOCAL_TTL 内重建过即可直接命中；_rebuild_bm25_for_key
+                # 内部已写 _bm25_ts_map[key]=time.time()，这里直接读它判断新旧。
+                local_ts = _bm25_ts_map.get(key, 0.0)
+                if time.time() - local_ts < _BM25_LOCAL_TTL:
+                    return cached
             else:
                 # Redis 模式：本地索引不旧于数据版本号则命中缓存（None 空索引也是合法缓存值）
                 local_ts = _bm25_ts_map.get(key, 0.0)
@@ -378,14 +391,14 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
 
     docs = _rrf_fuse(dense_docs, sparse_docs, settings.rag_hybrid_alpha)
 
-    # 【相关性门控】融合可能因稀疏关键词命中而返回文档，但余弦分数仍可能很低（无关查询）。用k=1的 cosine 分数做最终把关，低于rag_min_score → free chat，只多一次轻量查询，不做 spread。
+    # 【相关性门控】问题1修复后，稀疏侧返回的都是确凿命中（`@@` 过滤保证无关查询为空）。
+    # 这里不再用 k=1 cosine 一刀切（那会误杀"关键词命中但 bge-m3 余弦低"的正确结果）；
+    # 只做一次轻量 cosine 佐证：当稠密侧对该 query 完全零相关（not scored）才判定 free chat。
     if docs:
         scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
-        if not scored or scored[0][1] < settings.rag_min_score:
+        if not scored:
             logger.info(
-                "hybrid path but cosine top-1=%.3f below min_score=%.3f → free chat",
-                scored[0][1] if scored else 0,
-                settings.rag_min_score,
+                "hybrid path but cosine found no match at all → free chat",
             )
             return []
 

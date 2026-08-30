@@ -195,7 +195,15 @@ def query_conversation(
     # Save user message
     add_message(db, conv_id, role="user", content=req.query)
     # 【根治】：存库的是纯模型回答（前端已按 free_chat 渲染提示语），历史不含提示语
-    add_message(db, conv_id, role="assistant", content=answer, sources=sources)
+    # 非流式路径同样把 free_chat 落库，与流式 _save_messages_background 保持一致的标记。
+    add_message(
+        db,
+        conv_id,
+        role="assistant",
+        content=answer,
+        sources=sources,
+        free_chat=free_chat,
+    )
 
     # Trigger summary regeneration every SUMMARY_INTERVAL messages
     _maybe_summarize(db, conv_id, total)
