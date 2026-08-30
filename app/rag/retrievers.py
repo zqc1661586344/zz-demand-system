@@ -384,29 +384,8 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
 
     # 2. 稀疏有命中 → 无需 spread，稠密+稀疏 RRF 融合。
     #    pg_tsvector 后端的弱命中把关已在 SQL WHERE 完成（归一化 ts_rank > min_rank），
-    #    返回的候选均已达标，此处不再重复过滤；bm25_memory 回退无 sparse_score，保持原行为（不加下限）。
-    #    若 SQL 把关后稀疏侧为空 → 下分支回退纯稠密 + spread 判定。
-
-    # 过滤后稀疏侧为空 → 等同于"稀疏无命中"，回到纯稠密分支
-    if not sparse_docs:
-        scored = similarity_search_with_relevance(query, k=min(top_k, 4), user_id=user_id)
-        if not scored:
-            return []
-        top1, spread = scored[0][1], (scored[0][1] - scored[1][1] if len(scored) >= 2 else 1.0)
-        if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
-            logger.info(
-                "sparse filtered to empty; dense-only top-1=%.3f spread=%.3f → free chat",
-                top1,
-                spread,
-            )
-            return []
-        vs = get_vector_store()
-        return vs.as_retriever(
-            search_kwargs={
-                "k": top_k,
-                "filter": _user_where(user_id),
-            }
-        ).invoke(query)[:top_k]
+    #    返回的候选均已达标；bm25_memory 回退无 sparse_score，保持原行为（不加下限）。
+    #    能走到这里说明 sparse_docs 非空（分支 1 已处理空稀疏），无需再判。
 
     vs = get_vector_store()
     dense_docs = vs.as_retriever(
