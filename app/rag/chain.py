@@ -353,7 +353,7 @@ def query_rag_stream(
         full_answer += chunk
         yield {"type": "token", "data": chunk}
 
-    yield {"type": "sources", "data": sources, "full_answer": full_answer}
+    yield {"type": "sources", "data": sources, "full_answer": sanitize_citations(full_answer, sources)}
 
 
 # ---------- Conversation summarization ----------
