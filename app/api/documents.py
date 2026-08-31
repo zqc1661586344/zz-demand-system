@@ -42,12 +42,17 @@ async def upload_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    # 验证文件类型 — 先检查 MIME 类型，若无法确定则根据扩展名判断
+    # 验证文件类型 — 先检查 MIME 类型，若无法确定则根据扩展名判断（与 pipeline.load_document 支持格式保持一致）
     mime_to_ext = {
         "application/pdf": ".pdf",
         "text/plain": ".txt",
         "text/markdown": ".md",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+        "text/csv": ".csv",
+        "text/html": ".html",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+        "application/toml": ".toml",
     }
     ext_to_mime = {v: k for k, v in mime_to_ext.items()}
 

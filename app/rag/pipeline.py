@@ -44,6 +44,56 @@ def load_document(file_path: str, mime_type: str) -> list[Document]:
         loader = Docx2txtLoader(str(path))
         return loader.load()
 
+    # csv文件（纯标准库 csv 解析，无需额外依赖）
+    elif mime_type == "text/csv":
+        from langchain_community.document_loaders import CSVLoader
+
+        loader = CSVLoader(file_path=str(path))
+        return loader.load()
+
+    # html文件（需 beautifulsoup4）
+    elif mime_type == "text/html":
+        from langchain_community.document_loaders import BSHTMLLoader
+
+        loader = BSHTMLLoader(str(path))
+        return loader.load()
+
+    # excel文件（pandas + openpyxl 逐 sheet 转 CSV 文本，避免 unstructured 重依赖；每 sheet 一个 Document）
+    elif mime_type == "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet":
+        import pandas as pd
+
+        sheets = pd.read_excel(str(path), sheet_name=None)  # dict[sheet_name, DataFrame]
+        return [
+            Document(
+                page_content=f"### Sheet: {name}\n\n{df.astype(str).to_csv(index=False)}",
+                metadata={"source": str(path)},
+            )
+            for name, df in sheets.items()
+        ]
+
+    # ppt文件（python-pptx 遍历每个 slide 的 text frame，每张 slide 一个 Document）
+    elif mime_type == "application/vnd.openxmlformats-officedocument.presentationml.presentation":
+        from pptx import Presentation
+
+        prs = Presentation(str(path))
+        docs = []
+        for i, slide in enumerate(prs.slides, 1):
+            parts = [sh.text for sh in slide.shapes if getattr(sh, "has_text_frame", False)]
+            docs.append(
+                Document(
+                    page_content=f"### Slide {i}\n\n" + "\n\n".join(parts),
+                    metadata={"source": str(path)},
+                )
+            )
+        return docs
+
+    # toml文件（Python 3.11 内置 tomllib，无需额外依赖）
+    elif mime_type == "application/toml":
+        from langchain_community.document_loaders import TomlLoader
+
+        loader = TomlLoader(str(path))
+        return loader.load()
+
     else:
         logger.error(f"unsupported MIME type for loading: {mime_type}")
         raise ValueError(f"Unsupported MIME type for loading: {mime_type}")

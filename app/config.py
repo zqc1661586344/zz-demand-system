@@ -102,7 +102,7 @@ class Settings(BaseSettings):
     upload_dir: str = "./data/uploads"
     max_upload_size_mb: int = 50
     # 允许上传的文件扩展名（逗号分隔，与 pipeline.py 支持的格式保持一致）
-    allowed_extensions: list[str] = [".pdf", ".txt", ".md", ".docx"]
+    allowed_extensions: list[str] = [".pdf", ".txt", ".md", ".docx", ".csv", ".html", ".xlsx", ".pptx", ".toml"]
 
     # 多进程部署配置
     web_concurrency: int = 4

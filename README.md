@@ -194,6 +194,11 @@ flowchart LR
 | 纯文本 | `.txt` | `text/plain` |
 | Markdown | `.md` | `text/markdown` |
 | Word 文档 | `.docx` | `application/vnd.openxmlformats-officedocument.wordprocessingml.document` |
+| CSV | `.csv` | `text/csv` |
+| HTML | `.html` | `text/html` |
+| Excel | `.xlsx` | `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` |
+| PowerPoint | `.pptx` | `application/vnd.openxmlformats-officedocument.presentationml.presentation` |
+| TOML | `.toml` | `application/toml` |
 
 ---
 
