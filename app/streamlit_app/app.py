@@ -22,7 +22,7 @@ if _proj_root not in sys.path:
 import streamlit as st
 
 from app.logging_config import get_logger
-from app.streamlit_app.auth import logout
+from app.streamlit_app.auth import logout, restore_session_from_local_storage
 from app.streamlit_app.views.chat import new_conversation, page as chat_page
 from app.streamlit_app.views.documents import page as documents_page
 from app.streamlit_app.views.login import page as login_page
@@ -37,8 +37,10 @@ def main():
         layout="wide",
     )
 
-    # 入口守卫：未认证只渲染登录/注册页，不进入任何业务页面
-    if not st.session_state.get("authenticated"):
+    # 入口守卫：未认证时先尝试从浏览器 localStorage 静默恢复登录
+    # （解决 F5/关标签/新开标签后 session_state 被清空、跳回登录页的问题）；
+    # 恢复失败才渲染登录/注册页，不进入任何业务页面。
+    if not st.session_state.get("authenticated") and not restore_session_from_local_storage():
         login_page()
         st.stop()
 
