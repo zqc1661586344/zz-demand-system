@@ -18,8 +18,7 @@ class Settings(BaseSettings):
     # 运行环境：development / production
     environment: Literal["development", "production"] = "development"
 
-    # 启动时种子 admin(admin/admin123) 账号：默认关闭。仅开发/测试临时开启；
-    # 生产与默认配置都不创建，杜绝硬编码超管凭据入库。首次 bootstrap 见 README。
+    # 启动时种子 admin(admin/admin123) 账号：默认关闭。仅开发/测试临时开启；生产与默认配置都不创建，杜绝硬编码超管凭据入库。首次 bootstrap 见 README。
     seed_demo_user: bool = False
 
     # App信息配置
@@ -80,21 +79,13 @@ class Settings(BaseSettings):
     # Hybrid RAG 稠密向量 vs 稀疏关键词权重（0=纯BM25, 1=纯向量）
     rag_hybrid_alpha: float = 0.5
 
-    # 稀疏检索后端：bm25_memory（进程内 BM25，全量载入内存）/ pg_tsvector（PG 原生
-    # tsvector + ts_rank + GIN，增量、零内存驻留）。
-    # 仅当 database_url 指向 PostgreSQL 时才可用 pg_tsvector；SQLite 环境自动回退 bm25_memory。
+    # 稀疏检索后端：bm25_memory（进程内 BM25，全量载入内存）/ pg_tsvector（PG 原生 tsvector + ts_rank + GIN，增量、零内存驻留）。仅当 database_url 指向 PostgreSQL 时才可用 pg_tsvector；SQLite 环境自动回退 bm25_memory。
     rag_sparse_backend: Literal["bm25_memory", "pg_tsvector"] = "pg_tsvector"
 
-    # Hybrid 检索时稠密分数的离散度下限：top-1 与 top-2 的分数差低于此值，
-    # 说明检索结果没有区分度（平带），判定为 query 与文档集无关，回退 free chat。
-    # bge-m3 的分数被压缩在窄区间内，不相关的 query 也会打出 0.44~0.50 的分数，
-    # 仅靠绝对阈值拦不住，需要看 spread 来识别"无命中"。
+    # Hybrid 检索时稠密分数的离散度下限：top-1 与 top-2 的分数差低于此值，说明检索结果没有区分度（平带），判定为 query 与文档集无关，回退 free chat。bge-m3 的分数被压缩在窄区间内，不相关的 query 也会打出 0.44~0.50 的分数，仅靠绝对阈值拦不住，需要看 spread 来识别"无命中"。
     rag_hybrid_min_spread: float = 0.015
 
-    # 稀疏检索（pg_tsvector 后端）的 ts_rank 下限：低于此值的"命中"视为弱命中，
-    # 在 SQL WHERE 用归一化 ts_rank(..., 1) 直接过滤掉，防止仅靠个别泛词共现的无关 chunk 混入 RRF。
-    # 阈值作用于归一化尺度（与 SELECT 透出的 r / hybrid 一致），仅在 pg_tsvector 后端生效；
-    # bm25_memory 回退不加下限。
+    # 稀疏检索（pg_tsvector 后端）的 ts_rank 下限：低于此值的"命中"视为弱命中，在 SQL WHERE 用归一化 ts_rank(..., 1) 直接过滤掉，防止仅靠个别泛词共现的无关 chunk 混入 RRF。阈值作用于归一化尺度（与 SELECT 透出的 r / hybrid 一致），仅在 pg_tsvector 后端生效；bm25_memory 回退不加下限。
     rag_sparse_min_rank: float = 0.1
 
     # 是否启用 bge-reranker 交叉编码器重排（需 transformers + torch）
@@ -128,15 +119,13 @@ class Settings(BaseSettings):
     cors_origins: list[str] = ["*"]
 
     # 限流配置
-    rate_limit_enabled: bool = True
+    rate_limit_enabled: bool = False
     rate_limit_default: str = "30/minute"
     rate_limit_llm_query: str = "10/minute"
     rate_limit_login: str = "5/minute"
     rate_limit_upload: str = "5/minute"
 
-    # Redis BM25 缓存时间戳 TTL（秒）：进程内 LRU 缓存通过 Redis 时间戳判断是否过期，
-    # 在 TTL 内且时间戳一致则直接用缓存，否则从 DB 重建。
-    # 仅当 celery_broker_url 配置了 Redis 时生效。
+    # Redis BM25 缓存版本号键的 TTL（秒）：文档变更时 mark_bm25_data_changed 会把数据版本号时间戳 setex 到 Redis（键 bm25:ts:<user>）。查询时对比本地 _bm25_ts_map（上次重建时间）与该版本号：本地产出 >= Redis 版本号，命中本地缓存；否则失效从 DB 重建。该 TTL 仅作版本号键的过期兜底（过期则退化为本地时间戳短 TTL 兜底），并非缓存本身的生命周期。仅在 celery_broker_url 配置了 Redis 且 rag_sparse_backend=bm25_memory 时生效。
     redis_bm25_cache_ttl_seconds: int = 300
     chunk_size: int = 800
     chunk_overlap: int = 150

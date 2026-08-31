@@ -17,6 +17,7 @@ data/app.db
 .env
 .venv/
 venv/
+.env-bak-0830
 
 # Claude Code
 .claude/
