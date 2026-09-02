@@ -12,6 +12,7 @@
 from typing import Optional
 
 from app.compliance.agents.base import AgentBase, get_structured_llm
+from app.compliance.agents.prompts.extractor_prompt import build_extract_key_info_prompt
 from app.compliance.schemas.review import ClauseType, KeyInfo
 
 
@@ -109,11 +110,7 @@ class ExtractorAgent(AgentBase):
         if structured is None:
             return _extract_key_info_rule_based(raw_text)
         try:
-            prompt = (
-                "请从以下合同全文提取关键信息字段。"
-                "只输出有明确内容的字段，无内容留空。\n\n"
-                f"合同全文：\n{raw_text[:8000]}"
-            )
+            prompt = build_extract_key_info_prompt(raw_text)
             result = structured.invoke(prompt)
             if hasattr(result, "model_dump"):
                 data = result.model_dump(exclude_none=True)

@@ -106,6 +106,26 @@ def delete(path: str, **kwargs) -> Any:
     return request("DELETE", path, **kwargs)
 
 
+def download_bytes(path: str) -> bytes:
+    """GET 请求并返回原始 bytes，用于文件下载（报告、导出等）。"""
+    access_token, refresh_token = _get_tokens()
+    with httpx.Client(base_url=BASE_URL, timeout=60.0) as client:
+        headers = _headers(access_token)
+        resp = client.get(path, headers=headers)
+        if resp.status_code == 401 and refresh_token:
+            if _try_refresh(client, refresh_token):
+                access_token, _ = _get_tokens()
+                headers = _headers(access_token)
+                resp = client.get(path, headers=headers)
+        if resp.status_code >= 400:
+            try:
+                detail = resp.json().get("detail", resp.text)
+            except Exception:
+                detail = resp.text
+            raise ApiError(resp.status_code, detail)
+        return resp.content
+
+
 def upload(path: str, file_path: str, filename: str, mime_type: str) -> Any:
     """Upload a file via multipart POST.
 

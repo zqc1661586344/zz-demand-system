@@ -32,6 +32,7 @@ from app.compliance.skills.rag_skill import RagSkill
 from app.compliance.skills.report_skill import ReportSkill
 from app.compliance.skills.risk_skill import RiskSkill
 from app.compliance.workflows.state import (
+    STATUS_COMPARING,
     STATUS_COMPLETED,
     STATUS_FAILED,
     STATUS_GENERATING,
@@ -120,7 +121,9 @@ class ComplianceHarness:
         result = self._parse_skill.execute(ctx)
         self._persist_status(state["review_id"], STATUS_PARSING)
         if not result.get("ok"):
-            self._persist_status(state["review_id"], STATUS_FAILED, error_message=result.get("error"))
+            self._persist_status(
+                state["review_id"], STATUS_FAILED, error_message=result.get("error")
+            )
             return {**state, "status": STATUS_FAILED, "error": result.get("error")}
         data = result["data"]
         return {
@@ -158,13 +161,9 @@ class ComplianceHarness:
         self._persist_status(state["review_id"], STATUS_REVIEWING)
         clauses = state.get("clauses") or []
         # 1) Playbook 命中（确定性线索，test 模式主路径）
-        pb = self._playbook_skill.execute(
-            {"clauses": clauses, "rules": state.get("rules") or []}
-        )
+        pb = self._playbook_skill.execute({"clauses": clauses, "rules": state.get("rules") or []})
         # 2) 风险识别（test 模式用 Playbook 命中转风险；openai 融合 LLM）
-        rr = self._risk_skill.execute(
-            {"clauses": clauses, "rules": state.get("rules") or []}
-        )
+        rr = self._risk_skill.execute({"clauses": clauses, "rules": state.get("rules") or []})
         risks = (rr.get("data") or {}).get("risks") if rr.get("ok") else []
         counts = {
             "high_risk_count": sum(1 for r in risks if r.get("risk_level") == "high"),
@@ -175,29 +174,102 @@ class ComplianceHarness:
         return {**state, "risks": risks, "status": STATUS_REVIEWING}
 
     def reflect(self, state: dict) -> dict:
-        """节点 reflect：自反思质量评估。
-
-        MVP 质量分（确定性）：有风险且完成全流程 → 高分；重审越多置信度越低。
-        should_retry 据此决定是否回 review 重审（最多 compliance_max_retry 次）。
-        """
+        """多维度自反思：覆盖率 + 置信度 + 重审衰减。"""
         self._persist_status(state["review_id"], STATUS_REFLECTING)
         retry_count = int(state.get("retry_count") or 0)
         risks = state.get("risks") or []
-        quality = 1.0 if risks else 0.3
-        if retry_count > 0:
-            quality = max(0.3, quality - 0.15 * retry_count)
+        clauses = state.get("clauses") or []
+
+        if clauses and not risks:
+            coverage_score = 0.4
+        elif not clauses:
+            coverage_score = 0.2
+        else:
+            coverage_score = 1.0
+
+        if risks:
+            confs = [float(r.get("ai_confidence") or 1.0) for r in risks]
+            avg_conf = sum(confs) / len(confs)
+        else:
+            avg_conf = 0.5
+
+        decay = max(0.0, 0.15 * retry_count)
+        quality = max(0.1, (coverage_score * 0.5 + avg_conf * 0.5) - decay)
         next_retry = retry_count + 1
+
         self._persist_status(state["review_id"], STATUS_REFLECTING, retry_count=next_retry)
+        logger.info(
+            "reflect: q=%.2f cov=%.2f conf=%.2f retry=%d r=%d c=%d",
+            quality,
+            coverage_score,
+            avg_conf,
+            retry_count,
+            len(risks),
+            len(clauses),
+        )
         return {
             **state,
             "retry_count": next_retry,
             "quality_score": round(quality, 2),
+            "coverage_score": round(coverage_score, 2),
+            "avg_confidence": round(avg_conf, 2),
             "status": STATUS_REFLECTING,
         }
 
     def compare_template(self, state: dict) -> dict:
-        """节点 compare：模板比对（P1 预留）；MVP 无 template_id 时不启用，原样返回。"""
-        return state
+        """企业模板比对：复用 Playbook standard_position 做偏离检测 + 建议补全 + 红线升级。"""
+        risks = list(state.get("risks") or [])
+        rules = state.get("rules") or []
+        deviations = 0
+
+        for i, risk in enumerate(risks):
+            cn = risk.get("clause_number") or ""
+            best_rule = None
+            best_score = 0.0
+            for rule in rules:
+                rp = (rule.get("match_pattern") or "").lower()
+                if rp and (rp in cn.lower() or cn.lower() in rp):
+                    score = float(rule.get("priority") or 100)
+                    if score > best_score:
+                        best_score = score
+                        best_rule = rule
+            if not best_rule:
+                continue
+
+            enriched = dict(risk)
+            std_pos = best_rule.get("standard_position")
+            sugg = best_rule.get("suggested_clause")
+            red_line = best_rule.get("red_line", False)
+
+            if std_pos:
+                enriched["template_deviation"] = True
+                enriched["template_standard"] = std_pos
+                deviations += 1
+
+            if sugg and not enriched.get("suggestion"):
+                enriched["suggestion"] = sugg
+            elif sugg and enriched.get("suggestion") and sugg not in enriched.get("suggestion", ""):
+                enriched["suggestion"] = f"{enriched['suggestion']}（企业标准：{sugg}）"
+
+            if red_line and enriched.get("risk_level") != "high":
+                enriched["risk_level"] = "high"
+                enriched["red_line_flag"] = True
+
+            risks[i] = enriched
+
+        counts = {
+            "high_risk_count": sum(1 for r in risks if r.get("risk_level") == "high"),
+            "medium_risk_count": sum(1 for r in risks if r.get("risk_level") == "medium"),
+            "low_risk_count": sum(1 for r in risks if r.get("risk_level") == "low"),
+        }
+        self._persist_status(
+            state["review_id"],
+            STATUS_COMPARING,
+            template_deviations=deviations,
+            **counts,
+        )
+        logger.info("compare_template: %d deviations", deviations)
+        return {**state, "risks": risks, "template_deviations": deviations, **counts}
 
     def human_review(self, state: dict) -> dict:
         """节点 human_review：HITL 记录（MVP 简化，不真正 interrupt）。
@@ -241,7 +313,9 @@ class ComplianceHarness:
 
             review_id = state["review_id"]
             paths = generate_reports_for_review(
-                review_id, rep["data"]["report_data"], compliance_doc_id=state.get("compliance_doc_id")
+                review_id,
+                rep["data"]["report_data"],
+                compliance_doc_id=state.get("compliance_doc_id"),
             )
             self._persist_status(
                 state["review_id"],
@@ -262,16 +336,24 @@ class ComplianceHarness:
     # ===================== 条件边 =====================
 
     def should_compare(self, state: dict) -> str:
-        """条件边：有 template_id → compare；否则 skip。MVP 无模板比对，恒 skip。"""
-        return "compare" if state.get("template_id") else "skip"
+        """有 template_id 或 rules 含 standard_position/suggested_clause → compare。"""
+        rules = state.get("rules") or []
+        if state.get("template_id") or any(
+            r.get("standard_position") or r.get("suggested_clause") for r in rules
+        ):
+            return "compare"
+        return "skip"
 
     def should_retry(self, state: dict) -> str:
-        """条件边：质量不达标且未超重试上限 → retry；HITL 启用且有高风险 → human；
-        否则 → skip_human（直接生成报告）。"""
+        """质量不达标或置信度过低 → retry；HITL 且有 high → human；否则 → skip_human。"""
         quality = float(state.get("quality_score") or 0.0)
+        avg_conf = float(state.get("avg_confidence") or 0.5)
         retry = int(state.get("retry_count") or 0)
         max_retry = int(settings.compliance_max_retry)
-        if quality < settings.compliance_quality_threshold and retry <= max_retry:
+        low_conf = (
+            avg_conf < 0.6 and (state.get("clauses") or []) and not (state.get("risks") or [])
+        )
+        if (quality < settings.compliance_quality_threshold or low_conf) and retry <= max_retry:
             return "retry"
         if settings.compliance_hitl_enabled and any(
             r.get("risk_level") == "high" for r in (state.get("risks") or [])

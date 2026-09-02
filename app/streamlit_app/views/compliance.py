@@ -6,7 +6,7 @@ from datetime import datetime
 import streamlit as st
 
 from app.logging_config import get_logger
-from app.streamlit_app.api_client import ApiError, get, post
+from app.streamlit_app.api_client import ApiError, download_bytes, get, post
 
 logger = get_logger(__name__)
 
@@ -48,6 +48,39 @@ def _start_review(document_id: str, doc_type: str | None = None):
 
 _RISK_COLOR = {"high": "🔴", "medium": "🟡", "low": "🟢"}
 _RISK_LABEL = {"high": "高风险", "medium": "中风险", "low": "低风险"}
+
+_REPORT_FORMATS = [
+    ("HTML", "html", "text/html"),
+    (
+        "Word (.docx)",
+        "word",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ),
+    ("PDF", "pdf", "application/pdf"),
+]
+
+
+def _render_report_downloads(review_id: str):
+    """渲染审查报告下载按钮组（P1）。"""
+    st.markdown("### 📥 下载报告")
+    st.caption("生成失败的格式会被跳过（如环境未装 weasyprint 则 PDF 无数据）。")
+    cols = st.columns(len(_REPORT_FORMATS))
+    for col, (label, fmt, mime) in zip(cols, _REPORT_FORMATS):
+        with col:
+            try:
+                data = download_bytes(f"/api/compliance/reviews/{review_id}/report/{fmt}")
+            except ApiError as e:
+                st.button(f"⬇ {label}", disabled=True, help=str(e.detail))
+                continue
+            ts = datetime.now().strftime("%Y%m%d")
+            st.download_button(
+                label=f"⬇ {label}",
+                data=data,
+                file_name=f"compliance-review-{review_id[:8]}-{ts}.{fmt}",
+                mime=mime,
+                use_container_width=True,
+                key=f"dl_{fmt}_{review_id[:8]}",
+            )
 
 
 def page():
@@ -218,9 +251,11 @@ def _render_review_result(review_id: str, auto_refresh: bool = False):
 
     if total == 0:
         st.success("🎉 未检出风险条款，合同合规！")
+        _render_report_downloads(review_id)
         return
-
     # ---- 风险明细 ----
+    st.markdown("---")
+    _render_report_downloads(review_id)
     st.markdown("---")
     st.markdown("### 风险明细")
 

@@ -1,9 +1,13 @@
-"""Compliance Reviews API — 审查任务 CRUD + 启动 + 人工审核。"""
+"""Compliance Reviews API — 审查任务 CRUD + 启动 + 人工审核 + 报告下载。"""
+
+from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from app.compliance.services.review_service import ReviewService
+from app.config import settings
 from app.database import get_db
 from app.dependencies import get_current_user
 from app.logging_config import get_logger
@@ -115,3 +119,54 @@ def human_review(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return result
+
+
+_FORMAT_EXT = {"html": ".html", "word": ".docx", "pdf": ".pdf"}
+_MIME_MAP = {
+    ".html": "text/html; charset=utf-8",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".pdf": "application/pdf",
+}
+
+
+@router.get("/{review_id}/report/{format}")
+@limiter.limit("30/minute")
+def download_report(
+    review_id: str,
+    format: str = "html",
+    db: Session = Depends(get_db),  # noqa: ARG001 — 鉴权用
+    current_user: User = Depends(get_current_user),  # noqa: ARG001
+    request: Request = None,  # noqa: ARG001
+):
+    """下载审查报告（P1）：扫描 report_dir 返回最新匹配文件。
+
+    Args:
+        review_id: 审查任务 id。
+        format: html | word | pdf。
+    """
+    ext = _FORMAT_EXT.get(format)
+    if ext is None:
+        raise HTTPException(status_code=400, detail=f"unsupported format: {format}")
+
+    report_dir = Path(settings.compliance_report_dir)
+    if not report_dir.is_dir():
+        raise HTTPException(status_code=404, detail="report directory not ready")
+
+    prefix = f"review-{review_id}-"
+    candidates = sorted(
+        report_dir.glob(f"{prefix}*{ext}"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
+    if not candidates:
+        raise HTTPException(
+            status_code=404,
+            detail=f"no {format} report found for review {review_id}",
+        )
+
+    latest = candidates[0]
+    return FileResponse(
+        path=str(latest),
+        media_type=_MIME_MAP.get(ext, "application/octet-stream"),
+        filename=latest.name,
+    )

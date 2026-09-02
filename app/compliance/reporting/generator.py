@@ -265,34 +265,21 @@ def generate_reports_for_review(
     *,
     compliance_doc_id: str | None = None,
 ) -> dict:
-    """生成审查报告并落盘。
+    """生成审查报告并落盘（HTML + Word + PDF 三路并行，单格式失败不中断）。"""
+    from app.compliance.reporting.exporters.pdf_exporter import export_pdf
+    from app.compliance.reporting.exporters.word_exporter import export_word
 
-    Args:
-        review_id: 审查任务 id（用作报告文件名前缀）。
-        report_data: ReporterAgent 组装好的结构化数据。
-        compliance_doc_id: 关联文档 id（预留）。
-
-    Returns:
-        {"html": str, "word": str | None} — 各格式报告文件的绝对路径。
-        某个格式生成失败时对应值为 None（不中断其他格式）。
-    """
     report_dir = _ensure_dir(settings.compliance_report_dir)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     html_path = report_dir / f"review-{review_id}-{timestamp}.html"
     word_path = report_dir / f"review-{review_id}-{timestamp}.docx"
+    pdf_path = report_dir / f"review-{review_id}-{timestamp}.pdf"
 
-    # HTML
-    try:
-        html_content = render_html(report_data)
-        html_path.write_text(html_content, encoding="utf-8")
-        html_size = html_path.stat().st_size
-        logger.info("report html generated: %s (%d bytes)", html_path, html_size)
-    except Exception as e:  # noqa: BLE001
-        logger.exception("report html generation failed: %s", e)
-        return {"html": None, "word": None}
+    html_content = render_html(report_data)
+    html_path.write_text(html_content, encoding="utf-8")
+    logger.info("report html generated: %s (%d bytes)", html_path, html_path.stat().st_size)
 
-    # Word（MVP 占位：仅生成 HTML，Word 后补）
-    word_abs = None
-    logger.info("word export deferred (MVP); report html ready")
+    word_abs = export_word(report_data, str(report_dir)) or None
+    pdf_abs = export_pdf(html_content, str(pdf_path))
 
-    return {"html": str(html_path), "word": word_abs}
+    return {"html": str(html_path), "word": word_abs, "pdf": pdf_abs}
