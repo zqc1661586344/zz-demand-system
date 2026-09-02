@@ -31,7 +31,7 @@ for i in $(seq 1 30); do
 done
 
 echo "=== 启动 Streamlit 前端 (端口 8002) ==="
-.venv/bin/streamlit run app/streamlit_app/app.py --server.port 8002 --server.headless true &
+.venv/bin/streamlit run app/streamlit_app/app.py --server.port 8002 --server.headless true --server.address 127.0.0.1 &
 FRONTEND_PID=$!
 
 echo ""

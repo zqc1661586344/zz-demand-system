@@ -1,0 +1,23 @@
+{
+  "description": "占位法规种子（MVP 空库阶段结构模板）：真实法条全文由 P1 阶段补入；直接摄入本文件可验证建表→条款入库→向量化→语义检索全链路。",
+  "title": "中华人民共和国劳动合同法（占位）",
+  "regulation_type": "law",
+  "publish_date": null,
+  "effective_date": null,
+  "expire_date": null,
+  "source": "seed_data/labor_contract",
+  "articles": [
+    {
+      "article_number": "第十九条",
+      "chapter": "第三章 劳动合同的履行和变更",
+      "section": null,
+      "content": "劳动合同期限三个月以上不满一年的，试用期不得超过一个月；劳动合同期限一年以上不满三年的，试用期不得超过二个月；三年以上固定期限和无固定期限的劳动合同，试用期不得超过六个月。【占位示例条文，真实全文待补】"
+    },
+    {
+      "article_number": "第二十条",
+      "chapter": "第三章 劳动合同的履行和变更",
+      "section": null,
+      "content": "劳动者在试用期的工资不得低于本单位相同岗位最低档工资或者劳动合同约定工资的百分之八十，并不得低于用人单位所在地的最低工资标准。【占位示例条文，真实全文待补】"
+    }
+  ]
+}
