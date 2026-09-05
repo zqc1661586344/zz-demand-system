@@ -21,6 +21,9 @@ logger = get_logger(__name__)
 
 def load_document(file_path: str, mime_type: str) -> list[Document]:
     """从磁盘加载文件并返回LangChain的Document对象列表。"""
+
+    logger.info(f"loading document from file: {file_path},the mime type is: {mime_type}")
+
     path = Path(file_path)
 
     # pdf文件
@@ -116,7 +119,7 @@ def process_document(doc_id: str) -> None:
     try:
         doc = db.query(DocModel).filter(DocModel.id == doc_id).first()
         if doc is None:
-            logger.error(f"Document {doc_id} not found in database")
+            logger.error(f"document {doc_id} not found in database")
             return
 
         # 将文档状态标记为processing
@@ -143,6 +146,9 @@ def process_document(doc_id: str) -> None:
             d.metadata["uploaded_by"] = str(doc.uploaded_by)
             d.metadata["visibility"] = getattr(doc, "visibility", "private")
 
+        logger.info(f"loaded {len(raw_docs)} documents from file: {doc.file_path}")
+
+        # TODO: 当前切分策略单一，比如对pdf使用ocr识别，对markdown识别标题，可以根据文件类型选择不同的分块器，如 PDF 可以使用 PageContentSplitter，图片可以使用 ImageSplitter 等等
         # 切分chunks
         splitter = get_default_splitter()
         chunks = splitter.split_documents(raw_docs)
@@ -181,9 +187,7 @@ def process_document(doc_id: str) -> None:
         db.commit()
         logger.info(f"persisted {len(chunks)} chunks to document_chunks for doc {doc_id}")
 
-        # 存入向量数据库，成功后置 indexed。
-        # 若向量写入失败（重试也无望），清理刚落库的 chunk，避免 failed 文档的可检索
-        # 内容残留在 document_chunks 中；异常重新抛出交由外层置 failed / Celery 重试。
+        # 存入向量数据库，成功后置 indexed。若向量写入失败（重试也无望），清理刚落库的 chunk，避免 failed 文档的可检索内容残留在 document_chunks 中；异常重新抛出交由外层置 failed / Celery 重试。
         try:
             add_documents_to_store(chunks)
             update_document_status(db, doc_id, "indexed", chunk_count=len(chunks))
@@ -193,18 +197,18 @@ def process_document(doc_id: str) -> None:
             raise
         logger.info(f"document {doc_id}: indexed {len(chunks)} chunks")
 
-        # 文档数据变更：先广播数据版本号（使所有 worker 的相关缓存失效），
-        # 再增量重建本进程自己的索引。
+        # 文档数据变更：先广播数据版本号（使所有 worker 的相关缓存失效），再增量重建本进程自己的索引。
         is_shared = getattr(doc, "visibility", "private") == "shared"
         mark_bm25_data_changed(str(doc.uploaded_by), shared=is_shared)
         refresh_bm25_for_user(str(doc.uploaded_by))
 
     except (FileNotFoundError, ValueError) as e:
-        logger.exception(f"document {doc_id}: non-retryable error")
+        logger.error(f"document {doc_id}: non-retryable error")
         update_document_status(db, doc_id, "failed", error_message=str(e))
     except Exception as e:
-        logger.exception(f"document {doc_id} processing failed")
+        logger.error(f"document {doc_id} processing failed")
         update_document_status(db, doc_id, "failed", error_message=str(e))
-        raise  # 让 Celery 机制重试
+        # TODO: 处理异常，比如重试、记录日志等。让 Celery 机制重试
+        raise
     finally:
         db.close()

@@ -132,7 +132,7 @@ def liveness():
 
 @app.get("/api/health/ready")
 def readiness():
-    """就绪检查 — pgvector 等外部依赖是否可用。"""
+    """就绪检查 — DB / PGVector / LLM / Embedding 全部可达才返回 200。"""
     from sqlalchemy import text
 
     deps = {}
@@ -157,6 +157,28 @@ def readiness():
         deps["vector_store"] = "ok"
     except Exception as e:
         deps["vector_store"] = f"error: {e}"
+        all_healthy = False
+
+    # 3. LLM 可达性 probe
+    try:
+        from app.rag.llms import get_llm
+
+        llm = get_llm()
+        llm.invoke("ping")
+        deps["llm"] = "ok"
+    except Exception as e:
+        deps["llm"] = f"error: {type(e).__name__}: {str(e)[:120]}"
+        all_healthy = False
+
+    # 4. Embedding 可达性 probe
+    try:
+        from app.rag.embeddings import get_embedding_model
+
+        emb = get_embedding_model()
+        emb.embed_query("ping")
+        deps["embedding"] = "ok"
+    except Exception as e:
+        deps["embedding"] = f"error: {type(e).__name__}: {str(e)[:120]}"
         all_healthy = False
 
     status_code = 200 if all_healthy else 503

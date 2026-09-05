@@ -164,7 +164,19 @@ _REFERENTIAL_MARKERS = (
     "第二点",
 )
 # 疑问词：与无指代判定结合判断问题是否自包含
-_QUESTION_WORDS = ("什么", "怎么", "如何", "为什么", "哪", "几", "多少", "是否", "能不能", "是谁", "哪些")
+_QUESTION_WORDS = (
+    "什么",
+    "怎么",
+    "如何",
+    "为什么",
+    "哪",
+    "几",
+    "多少",
+    "是否",
+    "能不能",
+    "是谁",
+    "哪些",
+)
 # 自包含判定：无指代词时，问题长度达到该阈值即视为自包含（含疑问词的命令句/陈述句）
 _SELF_CONTAINED_MIN_LEN = 6
 
@@ -173,8 +185,7 @@ def _is_self_contained(query: str) -> bool:
     """判断问题是否明显自包含，需改写则返回 False。
 
     自包含 = 不含指代词，且（含疑问词 或 长度足够）——覆盖"介绍/列出/比较"等
-    无疑问词的命令句与陈述句，避免每一轮都对自包含问题触发一次额外 LLM 改写。
-    仍保留「有疑问词但带指代 → 需要改写」的判定（如"那个方案呢"）。
+    无疑问词的命令句与陈述句，避免每一轮都对自包含问题触发一次额外 LLM 改写。仍保留「有疑问词但带指代 → 需要改写」的判定（如"那个方案呢"）。
     """
     has_marker = any(m in query for m in _REFERENTIAL_MARKERS)
     if has_marker:
@@ -197,9 +208,7 @@ def _get_rewrite_llm():
     return _rewrite_llm
 
 
-def _rewrite_query(
-    query: str, history: list[dict] | None, summary: str | None = None
-) -> str:
+def _rewrite_query(query: str, history: list[dict] | None, summary: str | None = None) -> str:
     """将当前问题结合历史改写为独立查询；失败、无历史或问题自包含时返回原问题。"""
     if not history or _is_self_contained(query):
         return query
@@ -208,7 +217,7 @@ def _rewrite_query(
         # 仅当存在更早摘要时才注入，避免 summary=None 时出现字面量 "None"
         if summary:
             messages.append(("system", f"[更早对话摘要（仅参考）]\n{summary}"))
-        for msg in history[-6:]:  # 改写只需最近几轮，避免塞入过长老历史
+        for msg in history[-6:]:  # 只需改写最近几轮，避免塞入过长信息
             role = "user" if msg.get("role") == "user" else "assistant"
             messages.append((role, msg.get("content", "")))
         messages.append(("human", query))
@@ -285,7 +294,8 @@ def query_rag(
     user_id: str | None = None,
 ) -> dict:
     """运行完整的RAG查询: retrieve contexts, generate answer, return sources."""
-    # Format history into prompt context
+
+    # 格式化历史信息到提示词中
     history_text = format_history(history, summary=summary)
 
     # 检索相关文档（带相关性分数，用于阈值过滤）
@@ -293,8 +303,7 @@ def query_rag(
 
     if not docs:
         # 检索为空或相关性不足 → 不走 RAG，改为纯 LLM 自由聊天（基于自身知识回答，不附带来源）。
-        # 【根治】："找不到答案"提示语由前端按 free_chat 标记渲染，不进入模型输出路径，
-        # 从而不会污染存库的历史消息，避免下一轮 LLM 模仿复述该提示语导致重复。
+        # 【根治】："找不到答案"提示语由前端按 free_chat 标记渲染，不进入模型输出路径，从而不会污染存库的历史消息，避免下一轮 LLM 模仿复述该提示语导致重复。
         chain = _build_free_chat_chain()
         answer = chain.invoke({"question": query, "history": history_text})
         return {
@@ -304,14 +313,14 @@ def query_rag(
             "free_chat": True,
         }
 
-    # Format context and sources
+    # 格式化文本和来源信息
     context = format_context(docs)
     sources = format_sources(docs)
 
-    # Build and invoke chain
+    # 构建RAG链并调用
     chain = build_rag_chain()
     answer = chain.invoke({"context": context, "question": query, "history": history_text})
-    answer = sanitize_citations(answer, sources)  # 剔除越界/错乱的 [来源 N] 引用
+    answer = sanitize_citations(answer, sources)  # 剔除越界/错乱的[来源 N] 引用
 
     return {
         "answer": answer,
@@ -353,7 +362,11 @@ def query_rag_stream(
         full_answer += chunk
         yield {"type": "token", "data": chunk}
 
-    yield {"type": "sources", "data": sources, "full_answer": sanitize_citations(full_answer, sources)}
+    yield {
+        "type": "sources",
+        "data": sources,
+        "full_answer": sanitize_citations(full_answer, sources),
+    }
 
 
 # ---------- Conversation summarization ----------

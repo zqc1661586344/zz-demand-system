@@ -3,6 +3,10 @@
 from functools import lru_cache
 
 from app.config import settings
+from app.logging_config import get_logger
+
+
+logger = get_logger(__name__)
 
 
 class FakeEmbeddings:
@@ -25,7 +29,10 @@ def get_embedding_model():
     provider = settings.embedding_provider
 
     if provider == "local" or provider == "test":
+        logger.info("the local embeeding provider test")
         return FakeEmbeddings()
+
+    logger.info(f"the embeeding provider is: {provider}")
 
     if provider == "openai":
         from langchain_openai import OpenAIEmbeddings
@@ -45,7 +52,9 @@ def get_embedding_model():
         return OllamaEmbeddings(
             model=settings.ollama_embedding_model or "nomic-embed-text",
             base_url=settings.ollama_base_url,
+            timeout=settings.embedding_timeout_seconds,
         )
 
     else:
+        logger.error(f"unsupported llm provider: {provider}")
         raise ValueError(f"Unsupported embedding provider: {provider}")
