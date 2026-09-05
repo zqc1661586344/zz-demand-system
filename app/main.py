@@ -15,6 +15,10 @@ from app.middleware.tracing import TracingMiddleware
 from app.models.user import User, Role
 from app.services.auth_service import hash_password
 
+from app.logging_config import get_logger
+
+logger = get_logger(__name__)
+
 
 def _seed_demo_user():
     """种子 admin(admin/admin123) 账号：默认关闭；仅 SEED_DEMO_USER=true 且非生产时才创建。
@@ -74,9 +78,8 @@ def _recover_stuck_documents() -> None:
             for doc in stuck:
                 doc.status = "pending"
             db.commit()
-            import logging
 
-            logging.getLogger(__name__).warning(
+            logger.warning(
                 "Reset %d stuck document(s) from 'processing' to 'pending'",
                 len(stuck),
             )
