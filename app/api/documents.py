@@ -4,7 +4,16 @@ import os
 import uuid
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request, UploadFile, File
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    UploadFile,
+    File,
+)
 from sqlalchemy.orm import Session
 
 from app.config import settings
@@ -13,6 +22,7 @@ from app.dependencies import get_current_user
 from app.middleware.rate_limit import get_limiter
 from app.models.document import Document
 from app.models.user import User
+from app.schemas.common import PaginatedResponse
 from app.schemas.document import DocumentResponse, DocumentUploadResponse, ReprocessResponse
 from app.services.document_service import (
     create_document,
@@ -130,17 +140,19 @@ async def upload_document(
     return DocumentUploadResponse(id=doc.id, filename=stored_name, status="pending")
 
 
-@router.get("", response_model=list[DocumentResponse])
+@router.get("", response_model=PaginatedResponse[DocumentResponse])
 def list_documents(
-    skip: int = 0,
-    limit: int = 100,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     q = db.query(Document)
     if not current_user.is_superuser:
         q = q.filter(Document.uploaded_by == current_user.id)
-    return q.offset(skip).limit(limit).all()
+    total = q.count()
+    items = q.offset(offset).limit(limit).all()
+    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/{doc_id}", response_model=DocumentResponse)

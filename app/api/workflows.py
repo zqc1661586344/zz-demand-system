@@ -1,11 +1,13 @@
 """Workflow API routes — definitions and instances."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.database import get_db
 from app.dependencies import get_current_user, require_roles
 from app.models.user import User
+from app.models.workflow import WorkflowDefinition, WorkflowInstance, WorkflowStep
+from app.schemas.common import PaginatedResponse
 from app.schemas.workflow import (
     WorkflowDefinitionCreate,
     WorkflowDefinitionResponse,
@@ -41,14 +43,16 @@ def create_workflow_definition(
     )
 
 
-@router.get("/definitions", response_model=list[WorkflowDefinitionResponse])
+@router.get("/definitions", response_model=PaginatedResponse[WorkflowDefinitionResponse])
 def list_workflow_definitions(
-    skip: int = 0,
-    limit: int = 100,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return get_definitions(db, skip=skip, limit=limit)
+    total = db.query(WorkflowDefinition).count()
+    items = get_definitions(db, skip=offset, limit=limit)
+    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/definitions/{def_id}", response_model=WorkflowDefinitionResponse)
@@ -72,17 +76,21 @@ def create_workflow_instance(
     defn = get_definition_by_id(db, req.definition_id)
     if defn is None:
         raise HTTPException(status_code=404, detail="Workflow definition not found")
-    return create_instance(db, definition_id=req.definition_id, initiated_by=current_user.id, input_data=req.input_data)
+    return create_instance(
+        db, definition_id=req.definition_id, initiated_by=current_user.id, input_data=req.input_data
+    )
 
 
-@router.get("/instances", response_model=list[WorkflowInstanceResponse])
+@router.get("/instances", response_model=PaginatedResponse[WorkflowInstanceResponse])
 def list_workflow_instances(
-    skip: int = 0,
-    limit: int = 100,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    return get_instances(db, skip=skip, limit=limit)
+    total = db.query(WorkflowInstance).count()
+    items = get_instances(db, skip=offset, limit=limit)
+    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/instances/{inst_id}", response_model=WorkflowInstanceResponse)
@@ -97,13 +105,17 @@ def get_workflow_instance(
     return inst
 
 
-@router.get("/instances/{inst_id}/steps", response_model=list[WorkflowStepResponse])
+@router.get("/instances/{inst_id}/steps", response_model=PaginatedResponse[WorkflowStepResponse])
 def list_workflow_steps(
     inst_id: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     inst = get_instance_by_id(db, inst_id)
     if inst is None:
         raise HTTPException(status_code=404, detail="Workflow instance not found")
-    return get_steps(db, inst_id)
+    total = db.query(WorkflowStep).filter(WorkflowStep.instance_id == inst_id).count()
+    items = get_steps(db, inst_id)[offset : offset + limit]
+    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)

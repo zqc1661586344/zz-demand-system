@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,8 @@ from app.dependencies import get_current_user
 from app.logging_config import get_logger
 from app.middleware.rate_limit import get_limiter
 from app.models.user import User
+from app.schemas.common import PaginatedResponse
+from app.compliance.models.review import ComplianceReview
 from app.compliance.schemas.review import (
     HumanReviewRequest,
     ReviewCreateRequest,
@@ -54,15 +56,19 @@ def create_review(
 @router.get("")
 @limiter.limit("60/minute")
 def list_reviews(
-    limit: int = 50,
-    offset: int = 0,
+    limit: int = Query(50, ge=1, le=200),
+    offset: int = Query(0, ge=0),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
     request: Request = None,  # noqa: ARG001
 ):
+    q = db.query(ComplianceReview)
+    if not current_user.is_superuser:
+        q = q.filter(ComplianceReview.created_by == current_user.id)
+    total = q.count()
     service = ReviewService()
-    rows = service.list_reviews(db=db, user_id=current_user.id, limit=limit, offset=offset)
-    return {"items": rows, "total": len(rows), "limit": limit, "offset": offset}
+    items = service.list_reviews(db=db, user_id=current_user.id, limit=limit, offset=offset)
+    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/{review_id}", response_model_exclude_none=True)

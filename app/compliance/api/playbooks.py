@@ -16,6 +16,7 @@ from app.database import get_db
 from app.dependencies import get_current_user, require_roles
 from app.logging_config import get_logger
 from app.models.user import User
+from app.schemas.common import PaginatedResponse
 from app.compliance.models.playbook import CompliancePlaybook
 from app.compliance.schemas.playbook import (
     PlaybookCreateRequest,
@@ -28,7 +29,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/compliance/playbooks", tags=["compliance-playbooks"])
 
 
-@router.get("", response_model=dict)
+@router.get("", response_model=PaginatedResponse[PlaybookResponse])
 def list_playbooks(
     contract_type: Optional[str] = Query(None, description="按合同类型过滤"),
     is_active: Optional[bool] = Query(None),
@@ -53,12 +54,12 @@ def list_playbooks(
         .limit(limit)
         .all()
     )
-    return {
-        "items": [PlaybookResponse.model_validate(p).model_dump() for p in items],
-        "total": total,
-        "limit": limit,
-        "offset": offset,
-    }
+    return PaginatedResponse(
+        items=[PlaybookResponse.model_validate(p) for p in items],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/{playbook_id}", response_model=PlaybookResponse)

@@ -2,7 +2,7 @@
 
 import json
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
@@ -11,9 +11,11 @@ from app.database import SessionLocal, get_db
 from app.dependencies import get_current_user
 from app.logging_config import get_logger
 from app.middleware.rate_limit import get_limiter
+from app.models.conversation import Conversation
 from app.models.user import User
 from app.rag.chain import generate_summary, query_rag, query_rag_stream
 from app.rag.errors import to_structured_dict
+from app.schemas.common import PaginatedResponse
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationResponse,
@@ -79,17 +81,18 @@ def new_conversation(
     return conv
 
 
-@router.get("", response_model=list[ConversationResponse])
+@router.get("", response_model=PaginatedResponse[ConversationResponse])
 def list_conversations(
-    skip: int = 0,
-    limit: int = 100,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    convs = get_conversations_for_user(db, current_user.id, skip=skip, limit=limit)  # type: ignore[assignment]
-    result = []
+    total = db.query(Conversation).filter(Conversation.created_by == current_user.id).count()
+    convs = get_conversations_for_user(db, current_user.id, skip=offset, limit=limit)  # type: ignore[assignment]
+    items = []
     for conv in convs:
-        result.append(
+        items.append(
             ConversationResponse(
                 id=conv.id,  # type: ignore[assignment]
                 title=conv.title,  # type: ignore[assignment]
@@ -99,7 +102,7 @@ def list_conversations(
                 message_count=len(conv.messages) if hasattr(conv, "messages") else 0,
             )
         )
-    return result
+    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.get("/{conv_id}", response_model=ConversationResponse)
@@ -139,11 +142,11 @@ def remove_conversation(
     return {"message": "Conversation deleted successfully"}
 
 
-@router.get("/{conv_id}/messages", response_model=list[MessageResponse])
+@router.get("/{conv_id}/messages", response_model=PaginatedResponse[MessageResponse])
 def list_messages(
     conv_id: str,
-    skip: int = 0,
-    limit: int = 200,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(200, ge=1, le=500),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -152,7 +155,9 @@ def list_messages(
         raise HTTPException(status_code=404, detail="Conversation not found")
     if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
         raise HTTPException(status_code=403, detail="Access denied")
-    return get_messages(db, conv_id, skip=skip, limit=limit)
+    total = count_messages(db, conv_id)
+    items = get_messages(db, conv_id, skip=offset, limit=limit)
+    return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
 @router.post("/{conv_id}/query", response_model=QueryResponse)

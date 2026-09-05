@@ -39,7 +39,8 @@ def _ensure_conversation() -> str:
 def _load_messages(conv_id: str):
     """Load conversation history and populate chat_message list in session state."""
     try:
-        msgs = request("GET", f"/api/conversations/{conv_id}/messages")
+        data = request("GET", f"/api/conversations/{conv_id}/messages")
+        msgs = data.get("items", []) if isinstance(data, dict) else (data or [])
         conv_messages = []
         for m in msgs:
             entry = {"role": m["role"], "content": m["content"]}

@@ -19,6 +19,7 @@ from app.database import get_db
 from app.logging_config import get_logger
 from app.dependencies import get_current_user
 from app.models.user import User
+from app.schemas.common import PaginatedResponse
 from app.compliance.knowledge import ingestion as knowledge_ingestion
 from app.compliance.knowledge import retrieval as knowledge_retrieval
 from app.compliance.models.regulation import (
@@ -41,7 +42,7 @@ router = APIRouter(prefix="/api/compliance/knowledge", tags=["compliance-knowled
 # ─── 法规库 CRUD ────────────────────────────────────────────────────────────────
 
 
-@router.get("/regulations", response_model=dict)
+@router.get("/regulations", response_model=PaginatedResponse[RegulationResponse])
 def list_regulations(
     regulation_type: Optional[str] = Query(None),
     status: Optional[str] = Query(None),
@@ -66,11 +67,11 @@ def list_regulations(
             .filter(ComplianceRegulationArticle.regulation_id == r.id)
             .count()
         )
-        d = RegulationResponse.model_validate(r).model_dump()
-        d["article_count"] = count
-        enriched.append(d)
+        enriched.append(
+            RegulationResponse.model_validate(r).model_copy(update={"article_count": count})
+        )
 
-    return {"items": enriched, "total": total, "limit": limit, "offset": offset}
+    return PaginatedResponse(items=enriched, total=total, limit=limit, offset=offset)
 
 
 @router.get("/regulations/{regulation_id}", response_model=dict)

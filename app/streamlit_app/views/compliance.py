@@ -13,7 +13,8 @@ logger = get_logger(__name__)
 
 def _fetch_documents():
     try:
-        return get("/api/documents")
+        data = get("/api/documents")
+        return data.get("items", []) if isinstance(data, dict) else (data or [])
     except ApiError as e:
         st.error(f"获取文档列表失败：{e.detail}")
         return []

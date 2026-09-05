@@ -26,8 +26,10 @@ def _format_size(size_bytes: int) -> str:
 def _refresh_doc_list():
     """Fetch document list from backend and store in session state."""
     try:
-        docs = get("/api/documents")
-        st.session_state["doc_list"] = docs
+        data = get("/api/documents")
+        st.session_state["doc_list"] = (
+            data.get("items", []) if isinstance(data, dict) else (data or [])
+        )
     except ApiError as e:
         st.error(f"获取文档列表失败：{e.detail}")
         st.session_state["doc_list"] = []
