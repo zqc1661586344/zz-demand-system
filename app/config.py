@@ -130,6 +130,35 @@ class Settings(BaseSettings):
     chunk_size: int = 800
     chunk_overlap: int = 150
 
+    # ===== 文档合规审查模块（app/compliance/）=====
+    # false 时不加载审查路由/模型，不影响原有功能
+    compliance_enabled: bool = True
+    # 审查用 LLM 模型；为空则复用 llm_model
+    compliance_llm_model: str = ""
+    # 审查用低温度，降低幻觉
+    compliance_llm_temperature: float = 0.1
+    # 法规向量库独立 collection（与业务文档 documents 隔离）
+    compliance_vector_collection: str = "compliance_regulations"
+    # 自反思最大重试次数
+    compliance_max_retry: int = 2
+    # 自反思质量阈值
+    compliance_quality_threshold: float = 0.7
+    # 法规检索 Top-K
+    compliance_rag_top_k: int = 5
+    # Playbook 语义匹配阈值
+    compliance_playbook_semantic_threshold: float = 0.8
+    # 引用强制校验的原文相似度阈值（逐字匹配）
+    compliance_citation_similarity_threshold: float = 0.95
+    # 人机协同开关（MVP 预留 interrupt，默认不中断）
+    compliance_hitl_enabled: bool = True
+    # 低风险是否自动确认
+    compliance_hitl_auto_confirm_low: bool = True
+    # 审查报告存放目录（运行时）与法规原始文件目录
+    compliance_report_dir: str = "./data/compliance/reports"
+    compliance_regulation_dir: str = "./data/compliance/regulations"
+    # 法规库默认合同类型（MVP 聚焦劳动合同）
+    compliance_default_contract_type: str = "labor_contract"
+
     @property
     def upload_path(self) -> Path:
         """获取上传文件路径的属性方法

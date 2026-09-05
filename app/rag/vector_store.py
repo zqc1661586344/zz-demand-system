@@ -43,9 +43,7 @@ def _maintenance_engine():
 
 
 def _ensure_hnsw_index() -> None:
-    """幂等地为 embedding 建 HNSW（cosine）索引；无索引时向量检索退化为全表扫描。
-    使用模块级标志避免每次 add_documents 都执行 CREATE INDEX。
-    """
+    """幂等地为 embedding 建 HNSW（cosine）索引；无索引时向量检索退化为全表扫描。使用模块级标志避免每次 add_documents 都执行 CREATE INDEX。"""
     global _hnsw_index_ensured
     if _hnsw_index_ensured:
         return
@@ -79,24 +77,26 @@ def get_vector_store() -> PGVector:
 
 def add_documents_to_store(docs: list[Document]) -> list[str]:
     """向 PG 向量库添加文档；首次写入后自动确保 HNSW 索引存在。"""
-    vs = get_vector_store()
-    ids = vs.add_documents(docs)
-    _ensure_hnsw_index()
-    return ids
+    try:
+        vs = get_vector_store()
+        ids = vs.add_documents(docs)
+        _ensure_hnsw_index()
+        return ids
+    except Exception as e:
+        logger.error(f"pgvector add_documents failed: {e}")
+        return []
 
 
 def delete_documents_from_store(doc_id: str) -> None:
     """按 document_id 元数据删除向量。
 
-    PGVector.delete 只支持按 id 删除（不支持按 metadata 过滤），
-    故直接对 langchain_pg_embedding 表执行 SQL（cmetadata 为 JSONB，支持 -> 取值）。
-    向量表尚未创建（首次上传/库为空）时无需删除，直接返回。
+    PGVector.delete 只支持按 id 删除（不支持按 metadata 过滤），故直接对 langchain_pg_embedding 表执行 SQL（cmetadata 为 JSONB，支持 -> 取值）。向量表尚未创建（首次上传/库为空）时无需删除，直接返回。
     """
     try:
         with _maintenance_engine().begin() as conn:
             # 表还没创建（首次上传）时无需删除
             if not conn.dialect.has_table(conn, "langchain_pg_embedding"):
-                logger.debug("pgvector tables not created yet, skip delete for %s", doc_id)
+                logger.info("pgvector tables not created yet, skip delete for %s", doc_id)
                 return
             conn.execute(
                 text(
@@ -123,18 +123,26 @@ def get_retriever(k: int = 5, user_id: str | None = None) -> VectorStoreRetrieve
 
 def similarity_search(query: str, k: int = 5, user_id: str | None = None) -> list[Document]:
     """相似度搜索，支持按用户过滤。"""
-    vs = get_vector_store()
-    return vs.similarity_search(query, k=k, filter=_user_where(user_id))
+    try:
+        vs = get_vector_store()
+        return vs.similarity_search(query, k=k, filter=_user_where(user_id))
+    except Exception as e:
+        logger.error(f"pgvector similarity_search failed: {e}")
+        return []
 
 
 def mmr_search(
     query: str, k: int = 5, fetch_k: int = 20, lambda_mult: float = 0.7, user_id: str | None = None
 ) -> list[Document]:
     """按 Maximal Marginal Relevance 检索——平衡相关性与多样性，支持按用户过滤。"""
-    vs = get_vector_store()
-    return vs.max_marginal_relevance_search(
-        query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, filter=_user_where(user_id)
-    )
+    try:
+        vs = get_vector_store()
+        return vs.max_marginal_relevance_search(
+            query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, filter=_user_where(user_id)
+        )
+    except Exception as e:
+        logger.error(f"pgvector mmr_search failed: {e}")
+        return []
 
 
 def similarity_search_with_relevance(
@@ -142,10 +150,12 @@ def similarity_search_with_relevance(
 ) -> list[tuple[Document, float]]:
     """相似度搜索，返回 (Document, relevance_score) 元组列表，支持按用户过滤。
 
-    PGVector 的 similarity_search_with_score 返回 cosine 距离（越小越近），
-    这里换算为 relevance = 1 - distance，与 Chroma 版的分数语义完全一致
-    （正常相关文档落在 [0, 1] 区间，越高越相关）。
+    PGVector 的 similarity_search_with_score 返回 cosine 距离（越小越近），这里换算为 relevance = 1 - distance，与 Chroma 版的分数语义完全一致（正常相关文档落在 [0, 1] 区间，越高越相关）。
     """
-    vs = get_vector_store()
-    docs_and_dist = vs.similarity_search_with_score(query, k=k, filter=_user_where(user_id))
-    return [(doc, 1.0 - dist) for doc, dist in docs_and_dist]
+    try:
+        vs = get_vector_store()
+        docs_and_dist = vs.similarity_search_with_score(query, k=k, filter=_user_where(user_id))
+        return [(doc, 1.0 - dist) for doc, dist in docs_and_dist]
+    except Exception as e:
+        logger.error(f"pgvector similarity_search_with_relevance failed: {e}")
+        return []

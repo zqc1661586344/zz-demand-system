@@ -13,6 +13,7 @@ from app.logging_config import get_logger
 from app.middleware.rate_limit import get_limiter
 from app.models.user import User
 from app.rag.chain import generate_summary, query_rag, query_rag_stream
+from app.rag.errors import to_structured_dict
 from app.schemas.conversation import (
     ConversationCreate,
     ConversationResponse,
@@ -180,6 +181,7 @@ def query_conversation(
 
     # Always run RAG against the single document collection
     free_chat = False
+    error_info: dict | None = None
     try:
         result = query_rag(
             query=req.query, top_k=req.top_k, history=history, summary=summary, user_id=uid
@@ -187,9 +189,10 @@ def query_conversation(
         answer = result["answer"]
         sources = result["sources"]
         free_chat = bool(result.get("free_chat", False))
-    except Exception:
+    except Exception as exc:
         logger.exception("RAG query failed for conversation %s, query=%r", conv_id, req.query)
-        answer = "抱歉，问答服务暂时不可用，请稍后再试。"
+        error_info = to_structured_dict(exc, extra={"conversation_id": conv_id})
+        answer = error_info["message"]
         sources = []
 
     # Save user message
@@ -275,39 +278,52 @@ def query_conversation_stream(
 
     def event_stream():
         free_chat = False
-        # 使用独立 SessionLocal 保存用户消息，不持有 FastAPI 注入的 db session 跨流
+        _partially_streamed = False
         local_db = SessionLocal()
         try:
             add_message(local_db, conv_id, role="user", content=req.query)
             local_db.commit()
         finally:
             local_db.close()
+
+        full_answer_buffer = []
         try:
             for event in query_rag_stream(
                 query=req.query, top_k=req.top_k, history=history, summary=summary, user_id=uid
             ):
                 if event["type"] == "token":
+                    _partially_streamed = True
+                    full_answer_buffer.append(event["data"])
                     yield f"data: {json.dumps({'token': event['data']})}\n\n"
                 elif event["type"] == "free_chat":
                     free_chat = True
                     yield f"data: {json.dumps({'free_chat': True})}\n\n"
                 elif event["type"] == "sources":
                     sources = event["data"]
-                    # Schedule background DB write (仅助手回答，用户消息已同步保存)
+                    final_answer = event.get("full_answer", "") or "".join(full_answer_buffer)
                     background_tasks.add_task(
                         _save_messages_background,
                         conv_id,
-                        event["full_answer"],
+                        final_answer,
                         sources,
                         free_chat,
                     )
-                    # 同时在后台触发摘要重新生成
                     background_tasks.add_task(_maybe_summarize_background, conv_id, total)
                     yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
                     yield "data: [DONE]\n\n"
-        except Exception as e:
-            logger.warning("streaming RAG query failed: %s", e)
-            yield f"data: {json.dumps({'error': str(e), 'done': True})}\n\n"
+        except Exception as exc:
+            partial_answer = "".join(full_answer_buffer)
+            structured = to_structured_dict(exc, extra={"conversation_id": conv_id})
+            logger.warning(
+                "streaming RAG query failed for %s (partial=%d chars): %s",
+                conv_id,
+                len(partial_answer),
+                structured.get("error_code"),
+                exc,
+            )
+            if partial_answer:
+                yield f"data: {json.dumps({'token': partial_answer, 'partial': True})}\n\n"
+            yield f"data: {json.dumps({'error': structured, 'done': True, 'partial': bool(partial_answer)})}\n\n"
             yield "data: [DONE]\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

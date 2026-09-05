@@ -1,192 +1,179 @@
-# Enterprise RAG System
+# 企业 RAG 智能问答 & 文档合规审查系统
 
-> **企业级 RAG 文档问答系统** — 基于 FastAPI + LangChain + Streamlit + PostgreSQL(PGVector) 构建
+> **版本**: 0.4.0
+> **最后更新**: 2026-09-02
+> **项目状态**: RAG 核心功能 + 合规审查全链路已上线
 
-[![Python](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/)
-[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-green.svg)](https://fastapi.tiangolo.com/)
-[![LangChain](https://img.shields.io/badge/LangChain-1.3+-orange.svg)](https://python.langchain.com/)
-[![Streamlit](https://img.shields.io/badge/Streamlit-1.40+-red.svg)](https://streamlit.io/)
+一套面向企业的 **双引擎** 智能知识系统：
 
-## 📋 项目简介
+- 💬 **RAG 智能问答** — 上传内部文档，Hybrid RAG（稠密 PGVector + 稀疏 PG tsvector/BM25 + RRF 融合 + 可选重排）精准检索，SSE 流式回答
+- ⚖️ **文档合规审查** — LangGraph 多 Agent 协作（Supervisor → Extractor → Reviewer → Researcher → Reporter），自动识别合同/制度风险点、检索法规依据、生成 HTML/Word/PDF 三路报告
 
-企业级 RAG（Retrieval-Augmented Generation）文档问答系统，支持**多用户多角色**的文档管理、**文档处理管线**（PDF/TXT/MD/DOCX → 分块 → 向量化索引 + 稀疏关键词索引）、以及三种检索模式（纯向量 / MMR 多样性 / Hybrid 双路召回 + RRF 融合）的**智能问答**。内置可扩展的业务流程引擎，支持未来升级到 LangGraph 复杂工作流编排。
-
-### 核心功能
-
-- 🔐 **多用户认证**：JWT 无状态认证 + RBAC 三级角色（admin/editor/viewer）
-- 📄 **文档管理**：PDF/TXT/Markdown/DOCX 上传 → 自动解析 → 分块 → 向量化索引，所有文档统一检索
-- 💬 **RAG 问答**：基于全部文档上下文的智能问答，附带来源引用
-- 🔄 **业务流程**：内置文档审批、问题升级等示例流程
-- 🎨 **Streamlit UI**：现代化 Web 界面，对话页支持 SSE 流式输出
-- 🔌 **多 LLM 支持**：OpenAI 兼容 API / Ollama 本地部署 / 测试模式
+**前端** Streamlit（5 页面）| **后端** FastAPI（8001）| **数据** SQLite / PostgreSQL | **包管理** uv
 
 ---
 
 ## 🚀 快速开始
 
-### 前置要求
+### 环境要求
 
-- Python 3.11+
-- [uv](https://docs.astral.sh/uv/)（推荐包管理器）
+| 依赖 | 版本 | 说明 |
+|------|------|------|
+| Python | ≥ 3.11 | |
+| uv | 最新 | 包管理 |
+| PostgreSQL | ≥ 15（可选） | 生产推荐，开发可用 SQLite |
 
-### 1. 安装
-
-```bash
-# 克隆项目
-git clone <repo-url> zz-demand-system
-cd zz-demand-system
-
-# 安装依赖
-uv sync
-```
-
-### 2. 配置
+### 一键启动
 
 ```bash
-# 创建环境变量文件
+# 1. 克隆 & 进入
+git clone <repo> && cd zz-demand-system
+
+# 2. 安装依赖（含合规审查可选组）
+uv sync --all-extras
+
+# 3. 复制并填写配置
 cp .env.example .env
-```
+# 至少需设置：LLM_API_KEY / EMBEDDING_API_KEY / JWT_SECRET_KEY
+# 合规模块可选设置：COMPLIANCE_REPORT_DIR / COMPLIANCE_ENABLE_HITL
 
-编辑 `.env`，根据你的 LLM 供应商配置：
-
-**使用 OpenAI 兼容 API（推荐）**：
-```ini
-LLM_PROVIDER=openai
-LLM_API_KEY=sk-your-api-key-here
-LLM_API_BASE=https://api.openai.com/v1
-LLM_MODEL=gpt-4o-mini
-EMBEDDING_PROVIDER=openai
-EMBEDDING_MODEL=BAAI/bge-m3
-```
-
-**使用 Ollama 本地部署**：
-```ini
-LLM_PROVIDER=ollama
-OLLAMA_BASE_URL=http://localhost:11434
-OLLAMA_MODEL=qwen2.5:7b
-EMBEDDING_PROVIDER=ollama
-OLLAMA_EMBEDDING_MODEL=BAAI/bge-m3
-```
-
-**使用测试模式（无需外部 API）**：
-```bash
-# 通过环境变量启动
-LLM_PROVIDER=test EMBEDDING_PROVIDER=test .venv/bin/uvicorn app.main:app --port 8001
-```
-
-### 3. 启动服务
-
-```bash
-# 开发模式：后端 + 前端
+# 4. 启动（后端 8001 + Streamlit 前端 8002）
 bash start.sh
+# → 后端 http://localhost:8001
+# → 前端 http://localhost:8002
+# → API 文档 http://localhost:8001/docs
 ```
 
-> `start.sh` 会同时启动：
-> - FastAPI 后端（端口 8001）
-> - Streamlit 前端（端口 8002）
->
-> 按 `Ctrl+C` 同时停止两个进程。
+### 全新库初始化 admin
 
-### 4. 访问应用
-
-| 地址 | 用途 |
-|------|------|
-| http://localhost:8002 | **Streamlit Web 界面**（主入口） |
-| http://localhost:8001/docs | **API 文档**（Swagger UI） |
-| http://localhost:8001/redoc | API 文档（ReDoc） |
-
-> 也可以单独启动后端：
-> ```bash
-> .venv/bin/uvicorn app.main:app --reload --port 8001
-> ```
-
----
-
-## ⚙️ 配置说明
-
-全部配置通过 `.env` 文件设置，由 `pydantic-settings` 管理。
-
-### 核心配置项
-
-| 变量 | 必填 | 默认值 | 说明 |
-|------|------|--------|------|
-| `DATABASE_URL` | 否 | `sqlite:///./data/app.db` | 数据库连接（生产建议 PostgreSQL） |
-| `JWT_SECRET_KEY` | **生产必填** | `dev-secret-key-...` | JWT 签名密钥（生产环境请更换为随机字符串） |
-| `JWT_ACCESS_TOKEN_EXPIRE_MINUTES` | 否 | `30`（建议设 `525600`） | Access Token 有效期（分钟，长空闲场景建议 1 年） |
-| `LLM_PROVIDER` | 否 | `openai` | LLM 供应商：`openai` / `ollama` / `test` |
-| `LLM_API_KEY` | OpenAI 时必填 | — | API Key |
-| `LLM_API_BASE` | 否 | `https://api.openai.com/v1` | API 地址（支持 DeepSeek/通义千问等兼容服务） |
-| `LLM_MODEL` | 否 | `gpt-4o-mini` | LLM 模型名 |
-| `EMBEDDING_PROVIDER` | 否 | `openai` | Embedding 供应商：`openai` / `ollama` / `test` |
-| `EMBEDDING_MODEL` | 否 | `BAAI/bge-m3` | Embedding 模型（1024 维，cosine 距离） |
-| `OLLAMA_BASE_URL` | Ollama 时必填 | `http://localhost:11434` | Ollama 服务地址 |
-| `OLLAMA_MODEL` | 否 | `qwen2.5:7b` | Ollama 使用的 LLM 模型 |
-| `OLLAMA_EMBEDDING_MODEL` | 否 | `BAAI/bge-m3` | Ollama 使用的 Embedding 模型 |
-| `VECTOR_STORE_URL` | 否 | ` ` | PGVector数据库 |
-| `CHUNK_SIZE` | 否 | `800` | 文本分块大小（字符数） |
-| `CHUNK_OVERLAP` | 否 | `150` | 分块重叠（字符数） |
-| `MAX_UPLOAD_SIZE_MB` | 否 | `50` | 单文件最大上传大小 |
-| `RAG_SEARCH_TYPE` | 否 | `hybrid` | 检索模式：`similarity`（纯向量）/ `mmr`（多样性）/ `hybrid`（BM25+向量+RRF 融合） |
-| `RAG_HYBRID_ALPHA` | 否 | `0.5` | Hybrid 中稠密 vs 稀疏权重（0=纯 BM25，1=纯向量） |
-| `RAG_SPARSE_BACKEND` | 否 | `pg_tsvector` | 稀疏检索后端：`pg_tsvector`（PG 原生 tsvector+GIN，增量零内存，默认）/ `bm25_memory`（进程内 BM25，回退） |
-| `RAG_SPARSE_MIN_RANK` | 否 | `0.1` | pg_tsvector 稀疏命中的 ts_rank 下限：低于此值视为弱命中，在 hybrid 稀疏分支被过滤 |
-| `RAG_HYBRID_MIN_SPREAD` | 否 | `0.015` | Hybrid 模式的分数离散度阈值：top1-top2 低于此值回退自由聊天 |
-| `RAG_MIN_SCORE` | 否 | `0.4` | 纯向量模式的相关性分数阈值（低于此值回退自由聊天） |
-| `RAG_RERANK_ENABLED` | 否 | `false` | 是否启用 bge-reranker 交叉编码器重排（需 transformers + torch） |
-| `RAG_RERANK_MODEL` | 否 | `BAAI/bge-reranker-v2-m3` | 重排器模型名 |
-| `RAG_RERANK_TOP_N` | 否 | `5` | 重排后保留的 top-N 结果 |
-
-完整配置项见 [`app/config.py`](app/config.py)。
-
----
-
-## 📚 使用指南
-
-### 角色权限
-
-| 角色 | 权限 |
-|------|------|
-| **admin** | 全部权限：管理用户、管理文档、管理流程 |
-| **editor** | 上传/删除文档、发起对话 |
-| **viewer** | 查看文档、发起对话（只读） |
-
-> 新注册用户自动分配 `viewer` 角色，由 admin 在"管理"页面调整。
-
-### 首次登录 & 首个 admin
-
-前端默认展示**登录/注册页**，不再硬编码自动登录。注册用户默认 `viewer`；首个 `admin` 需手动种出：
-
-> 项目默认 `SEED_DEMO_USER=false`，**不会自动创建任何 admin 账号**（杜绝硬编码超管凭据入库）。全新库拿第一个 admin 的方式：
+首次启动自动建表（`Base.metadata.create_all` + Alembic）。生产环境不会自动种 admin，需要手动启用一次：
 
 ```bash
-# 临时开启种子开关，启动一次种出 admin/admin123
 SEED_DEMO_USER=true bash start.sh
-
-# → 用 admin / admin123 登录
-# → 立即改密：POST /api/auth/change-password（见下）或在 UI 引导（若已提供）
+# → 用 admin / admin123 登录后立即改密
 curl -X POST http://localhost:8001/api/auth/change-password \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
   -d '{"old_password":"admin123","new_password":"<强密码>"}'
-
-# → 重启（不带 SEED_DEMO_USER），开关关闭后不再重建，后续凭新密码登录
+# → 重启（不带开关）
 bash start.sh
 ```
 
-> 生产环境无论开关如何都**不**种 admin（`main.py::_seed_demo_user` 有生产守卫）。
+### 合规审查种子数据（可选）
 
-### 工作流程
+```bash
+# 一键初始化 Playbook 默认规则 + 4 部核心法规种子（劳动合同方向）
+curl -X POST http://localhost:8001/api/compliance/knowledge/seed \
+  -H "Authorization: Bearer <token>"
+# 或在 Streamlit → 📚 法规库 → 点击「🌱 初始化种子数据」按钮
+```
+
+---
+
+## 🏗️ 系统架构
+
+```mermaid
+flowchart TD
+    subgraph 用户层
+        SL["Streamlit 前端 (8002)"]
+        API_CLI["API 客户端 (curl / SDK)"]
+    end
+
+    subgraph "FastAPI 网关 (8001)"
+        ROUTER["路由层 (app/api/router.py)"]
+        JWT["JWT 鉴权 + 限流中间件"]
+    end
+
+    subgraph "基础 RAG 子系统"
+        AUTH["Auth / Users"]
+        DOCS["Documents 管理 + 解析管线"]
+        CONV["Conversations + RAG 查询"]
+        RAG_ENGINE["RAG Engine<br/>Hybrid Retriever<br/>(PGVector + tsvector/BM25 + RRF)"]
+    end
+
+    subgraph "合规审查子系统 (app/compliance)"
+        REVIEW["Reviews API<br/>(CRUD + 启动 + 报告下载)"]
+        PB["Playbooks API / Service<br/>(规则库 CRUD)"]
+        KB["Knowledge API / Service<br/>(法规 CRUD + 种子 + 检索)"]
+        HARNESS["ReviewHarness<br/>(LangGraph 运行时)"]
+        SKILLS["Skills<br/>ParseSkill / PlaybookSkill / RiskSkill / RagSkill / ReportSkill"]
+        AGENTS["Agents<br/>Supervisor / Extractor / Reviewer / Researcher / Reporter"]
+        REPORT["Reporting<br/>HTML + Word + PDF 三路生成"]
+    end
+
+    subgraph "数据层"
+        DB["SQLite / PostgreSQL<br/>Alembic 迁移"]
+        VEC_DOC["PGVector: documents 集合<br/>(bge-m3 1024d)"]
+        VEC_REG["PGVector: compliance_regulations 集合"]
+        FILES["文件存储<br/>(原始文档 + 报告落盘)"]
+    end
+
+    SL --> ROUTER
+    API_CLI --> ROUTER
+    ROUTER --> JWT
+    JWT --> AUTH & DOCS & CONV & REVIEW & PB & KB
+
+    CONV --> RAG_ENGINE
+    RAG_ENGINE --> VEC_DOC
+    RAG_ENGINE --> DB
+
+    REVIEW --> HARNESS
+    HARNESS --> SKILLS & AGENTS
+    HARNESS --> DB
+    HARNESS --> REPORT
+    SKILLS --> KB
+    KB --> VEC_REG & DB
+    REPORT --> FILES
+
+    DOCS --> FILES
+    DOCS --> VEC_DOC & DB
+```
+
+---
+
+## 📋 使用流程
+
+### 基础 RAG 问答流程
 
 ```mermaid
 flowchart LR
-    A[注册 / 登录] --> B[上传文档]
-    B --> C[等待索引完成]
-    C --> D[新建对话]
-    D --> E[提问]
-    E --> F[查看回答与来源]
+    A["注册 / 登录"] --> B["上传文档<br/>支持 PDF/DOCX/MD 等"]
+    B --> C["等待索引完成<br/>解析 → 分块 → 向量化"]
+    C --> D["新建对话"]
+    D --> E["提问"]
+    E --> F["Hybrid RAG 检索"]
+    F --> G["LLM 生成回答<br/>带来源引用"]
+```
+### 合规审查流程
+
+```mermaid
+flowchart LR
+    A1["登录"] --> A2["上传待审文档<br/>劳动合同 / 制度文件等"]
+    A2 --> A3["合规审查页<br/>选择 Playbook"]
+    A3 --> A4["启动审查<br/>LangGraph 异步运行"]
+    A4 --> A5["查看风险清单<br/>高中低三级"]
+    A5 --> A6{"高风险?"}
+    A6 -->|是| A7["人工审核 HITL<br/>确认 / 修改"]
+    A6 -->|否| A8["自动生成报告"]
+    A7 --> A8
+    A8 --> A9["下载报告<br/>HTML / Word / PDF"]
 ```
 
-### 支持的文件格式
+### Streamlit 页面结构
+
+| 页面 | 功能 |
+|------|------|
+| 💬 对话 | RAG 问答 + 流式回答 + 多轮历史 |
+| 📁 文档管理 | 上传 / 删除 / 索引状态查看 |
+| ⚖️ 合规审查 | 发起审查 + 风险明细 + HITL + 三路报告下载 |
+| 📋 Playbook | 规则库 CRUD（企业红线条款 + 关键词 + 风险等级） |
+| 📚 法规库 | 种子初始化 + 法规录入 + 语义检索 |
+
+---
+
+## 📄 支持的文件格式
+
+RAG 问答和合规审查共用同一套文档解析管线，支持以下格式：
 
 | 格式 | 扩展名 | MIME 类型 |
 |------|--------|-----------|
@@ -237,6 +224,83 @@ flowchart TD
 
 ---
 
+## ⚖️ 文档合规审查
+
+面向企业法务 / 合规 / 风控团队的 **智能文档审查副驾驶**。上传合同、政策文件、内部制度，Agent 自动识别风险点、检索法规依据、生成审查报告、标注修改建议。
+
+### LangGraph 工作流
+
+```mermaid
+flowchart TD
+    A([START]) --> B[ParseSkill<br/>解析文档 + 条款切分]
+    B --> C[SupervisorAgent<br/>制定审查计划]
+    C --> D[ExtractorAgent<br/>条款分类 + 关键信息抽取]
+    D --> E[PlaybookSkill<br/>关键词/规则匹配]
+    E --> F[RiskSkill<br/>风险识别 + 三级评级]
+    F --> G[RagSkill<br/>法规条文检索 + 引用校验]
+    G --> H[ReviewerAgent<br/>条款级审查意见]
+    H --> I[质量自评 reflect<br/>覆盖率 + 置信度 + 重试衰减]
+    I --> J{should_retry?}
+    J -->|质量不足 + 未超上限| E
+    J -->|有高风险 + HITL 开启| K[HitlManager<br/>人工审核]
+    J -->|模板比对启用| L[compare_template<br/>模板偏离检测]
+    J -->|否则| M[ReporterAgent + generator.py<br/>组装报告 + 三路落盘]
+    K --> M
+    L --> M
+    M --> N([END])
+    style A fill:#6ee7b7
+    style N fill:#fca5a5
+    style J fill:#fde68a
+    style E fill:#c4b5fd
+    style M fill:#93c5fd
+```
+
+### 状态流转
+
+```mermaid
+stateDiagram-v2
+    [*] --> pending: POST /reviews
+    pending --> parsing: ParseSkill
+    parsing --> planning: Supervisor + Extractor
+    planning --> reviewing: PlaybookSkill + RiskSkill
+    reviewing --> reflecting: 质量自评
+    reflecting --> reviewing: should_retry → 重试
+    reflecting --> pending_human: should_retry → HITL
+    reflecting --> comparing: compare_template
+    pending_human --> generating: HITL 通过
+    comparing --> generating: 比对完成
+    generating --> completed: HTML/Word/PDF 落盘
+    parsing --> failed
+    planning --> failed
+    reviewing --> failed
+    generating --> failed
+    failed --> [*]
+    completed --> [*]
+```
+
+### 关键概念
+
+| 概念 | 说明 | 管理入口 |
+|------|------|----------|
+| **Playbook** | 企业红线条款、标准措辞、风险阈值的可配置规则集 | 📋 Playbook 页面 CRUD |
+| **法规知识库** | 审查的法规依据来源（PGVector 独立 collection `compliance_regulations`） | 📚 法规库页面（种子初始化 + 录入 + 语义检索） |
+| **风险等级** | high（高）/ medium（中）/ low（低） | 审查结果页直观展示 |
+| **报告格式** | HTML（自包含 + 内嵌样式）/ Word（python-docx 生成封面+目录）/ PDF（weasyprint） | 审查完成后一键三路下载 |
+| **HITL** | 高风险条款留痕，人工可确认/修改（MVP 默认不阻塞自动流程） | 审查结果页「人工审核」按钮 |
+
+### 审查报告示例产出
+
+```
+data/compliance/reports/
+├── review-abc123-20260901-143022.html
+├── review-abc123-20260901-143022.docx
+└── review-abc123-20260901-143022.pdf
+```
+
+> 📄 **详细设计**：完整的技术方案、数据库 ER 图、Agent / Skill 接口定义见 [`docs/拓展功能2期.md`](docs/拓展功能2期.md)；审查链路时序图见 [`docs/review_chain.md`](docs/review_chain.md)。
+
+---
+
 ## 🔌 API 概览
 
 ### 认证
@@ -257,16 +321,15 @@ curl -X POST http://localhost:8001/api/auth/login \
 ### 文档
 
 ```bash
-# 上传文档（multipart）
+# 上传文档
 curl -X POST http://localhost:8001/api/documents/upload \
   -H "Authorization: Bearer <token>" \
   -F "file=@report.pdf"
-# → 返回 {id, filename, status: "pending"}
 
 # 查看文档状态
 curl http://localhost:8001/api/documents/<doc-id> \
   -H "Authorization: Bearer <token>"
-# → status: "indexed" 时表示处理完成
+# → status: "indexed" 表示索引完成
 
 # 列出所有文档
 curl http://localhost:8001/api/documents \
@@ -290,7 +353,93 @@ curl -X POST http://localhost:8001/api/conversations/<conv-id>/query \
 # → 返回 {answer, sources: [{filename, page}]}
 ```
 
-完整 API 端点清单见 [docs/architecture.md](docs/architecture.md#6-api-端点设计) 或启动后访问 `/docs`。
+### 合规审查
+
+```bash
+# 发起审查（基于已上传并 indexed 的文档）
+curl -X POST http://localhost:8001/api/compliance/reviews \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "document_id": "<已上传文档 id>",
+    "playbook_id": "<可选，指定规则集>",
+    "template_id": "<可选，模板比对参考>"
+  }'
+# → 返回 {review_id, status: "pending"}，后台 LangGraph 异步运行
+
+# 查询审查详情 + 风险清单
+curl http://localhost:8001/api/compliance/reviews/<review-id> \
+  -H "Authorization: Bearer <token>"
+# → 返回 {status, risks: [{clause_number, risk_level, description, suggestion, legal_references}], ...}
+
+# 人工审核（HITL）
+curl -X POST http://localhost:8001/api/compliance/reviews/<review-id>/human \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"risk_id": "<高风险条款 id>", "action": "confirm", "note": "法务已确认"}'
+
+# 下载报告（三路格式）
+curl http://localhost:8001/api/compliance/reviews/<review-id>/report/html \
+  -H "Authorization: Bearer <token>"
+curl http://localhost:8001/api/compliance/reviews/<review-id>/report/word \
+  -H "Authorization: Bearer <token>"
+curl http://localhost:8001/api/compliance/reviews/<review-id>/report/pdf \
+  -H "Authorization: Bearer <token>"
+```
+
+### Playbook 规则库
+
+```bash
+# 列出 / 创建 / 更新 / 删除 Playbook
+curl http://localhost:8001/api/compliance/playbooks \
+  -H "Authorization: Bearer <token>"
+
+curl -X POST http://localhost:8001/api/compliance/playbooks \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "劳动合同默认规则",
+    "contract_type": "labor_contract",
+    "rules": [
+      {"rule_id": "R001", "rule_type": "keyword", "risk_level": "high",
+       "keywords": ["违约金过高", "竞业限制超过2年"], "legal_basis_ref": "劳动合同法第23条"},
+      {"rule_id": "R002", "rule_type": "threshold", "risk_level": "medium",
+       "keywords": ["试用期"], "match_threshold": 0.8}
+    ]
+  }'
+```
+
+### 法规知识库
+
+```bash
+# 种子初始化（一键种 4 部核心法规）
+curl -X POST http://localhost:8001/api/compliance/knowledge/seed \
+  -H "Authorization: Bearer <token>"
+
+# 手动录入法规
+curl -X POST http://localhost:8001/api/compliance/knowledge/regulations \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "中华人民共和国劳动合同法",
+    "regulation_type": "law",
+    "effective_date": "2008-01-01",
+    "clauses": [
+      {"article": "第19条", "content": "劳动合同期限三个月以上不满一年的，试用期不得超过一个月..."},
+      {"article": "第23条", "content": "用人单位与劳动者可以在劳动合同中约定保守..."},
+      {"article": "第25条", "content": "除本法第二十二条和第二十三条规定的情形外..."},
+      {"article": "第47条", "content": "经济补偿按劳动者在本单位工作的年限..."}
+    ]
+  }'
+
+# 法规语义检索
+curl -X POST http://localhost:8001/api/compliance/knowledge/search \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "试用期最长不得超过多长时间？", "top_k": 5}'
+```
+
+完整 API 端点清单见启动后访问 `/docs`，或 [`docs/architecture.md`](docs/architecture.md)。
 
 ---
 
@@ -298,65 +447,62 @@ curl -X POST http://localhost:8001/api/conversations/<conv-id>/query \
 
 ### 1. 更换密钥
 
-生产环境必须更换 `JWT_SECRET_KEY`，可以使用以下命令生成：
-
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-### 2. 启动服务（后台运行）
+将生成的密钥填入 `.env` 的 `JWT_SECRET_KEY`。**生产禁止使用默认值**。
 
-**方式一：使用 start.sh（推荐）**
+### 2. 启动服务
+
+**方式一：start.sh（推荐）**
+
 ```bash
 bash start.sh
+# 后端 8001 + Streamlit 8002 同时启动
 ```
-内部使用 `nohup` 同时启动后端和前端，日志写入 `/tmp/rag.log`。
 
-**方式二：分别启动**
+**方式二：分别后台启动**
 
 ```bash
-# 后端
-nohup .venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8001 > /tmp/rag.log 2>&1 &
+nohup .venv/bin/uvicorn app.main:app \
+  --host 0.0.0.0 --port 8001 > /tmp/rag.log 2>&1 &
 
-# 前端
-nohup .venv/bin/streamlit run app/streamlit_app/app.py --server.port 8002 --server.headless true > /tmp/streamlit.log 2>&1 &
+nohup .venv/bin/streamlit run app/streamlit_app/app.py \
+  --server.port 8002 --server.headless true > /tmp/streamlit.log 2>&1 &
 
 # 验证
 curl http://localhost:8001/api/health
-# → {"status":"ok","version":"0.1.0"}
-
-# 看日志
-tail -f /tmp/rag.log
-# 停止（用 pgrep 查到的 PID）
-pgrep -af uvicorn
-pgrep -af streamlit
-kill <PID>
+# → {"status":"ok","version":"0.4.0"}
 ```
-
-> 说明：多进程建议用 `gunicorn`（`gunicorn app.main:app -k uvicorn.workers.UvicornWorker ...`）；
-> 需要开机自启/崩了自动重启，见下方 systemd 一节。若 gunicorn 引导 worker 报 `Worker failed to boot / code 3`，
-> 多为 gunicorn 与 uvicorn 版本不兼容，直接用上面的单进程 uvicorn 最稳妥。
 
 ### 3. 迁移到 PostgreSQL
 
 ```bash
-# 安装 PostgreSQL 依赖
 uv sync --extra postgres
-
-# 更新 .env
+# .env
 DATABASE_URL=postgresql://user:password@host:5432/rag_db
-
-# 运行迁移
 alembic upgrade head
 ```
 
-### 5. 使用 Nginx 反向代理
+### 4. 报告目录持久化
+
+合规审查报告落盘到 `COMPLIANCE_REPORT_DIR`（默认 `data/compliance/reports/`）。生产环境建议：
+
+```bash
+# 迁移到大容量存储
+mkdir -p /data/compliance-reports
+ln -s /data/compliance-reports /opt/zz-demand-system/data/compliance/reports
+```
+
+### 5. Nginx 反向代理
 
 ```nginx
 server {
     listen 443 ssl;
     server_name rag.example.com;
 
+    # 后端 API + SSE
     location / {
         proxy_pass http://127.0.0.1:8001;
         proxy_http_version 1.1;
@@ -365,16 +511,25 @@ server {
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
     }
+
+    # Streamlit 前端（WebSocket 必需）
+    location /streamlit/ {
+        proxy_pass http://127.0.0.1:8002/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+    }
 }
 ```
 
-### 4. 使用 systemd 管理服务
+### 6. systemd 服务管理
 
-**后端服务** `/etc/systemd/system/rag-backend.service`：
+**后端** `/etc/systemd/system/rag-backend.service`：
 
 ```ini
 [Unit]
-Description=RAG System Backend
+Description=RAG + Compliance Backend
 After=network.target
 
 [Service]
@@ -390,11 +545,11 @@ Environment=APP_DEBUG=false
 WantedBy=multi-user.target
 ```
 
-**前端服务** `/etc/systemd/system/rag-frontend.service`：
+**前端** `/etc/systemd/system/rag-frontend.service`：
 
 ```ini
 [Unit]
-Description=RAG System Frontend (Streamlit)
+Description=Streamlit Frontend
 After=network.target
 Requires=rag-backend.service
 
@@ -414,73 +569,143 @@ WantedBy=multi-user.target
 
 ## 🧪 测试
 
-### 端到端测试
+### 端到端
 
 ```bash
-# 1. 启动服务（测试模式）
 LLM_PROVIDER=test EMBEDDING_PROVIDER=test .venv/bin/uvicorn app.main:app --port 8001 &
-
-# 2. 运行测试
 python test_e2e.py
 ```
 
-测试覆盖以下场景：
+覆盖场景：
 - 用户注册 → 登录 → 获取个人信息
 - 上传文档 → 索引完成
 - 创建对话 → RAG 查询 → 获取消息
 - 健康检查
 
+### 合规审查链路
+
+```bash
+# 1. 确保法规种子已初始化
+curl -X POST http://localhost:8001/api/compliance/knowledge/seed \
+  -H "Authorization: Bearer <token>"
+
+# 2. 上传一个测试合同
+curl -X POST http://localhost:8001/api/documents/upload \
+  -H "Authorization: Bearer <token>" -F "file=@test_labor_contract.docx"
+
+# 3. 发起审查并等待完成
+curl -X POST http://localhost:8001/api/compliance/reviews \
+  -H "Authorization: Bearer <token>" \
+  -H "Content-Type: application/json" \
+  -d '{"document_id": "<doc-id>"}'
+
+# 4. 下载报告
+curl http://localhost:8001/api/compliance/reviews/<review-id>/report/html \
+  -H "Authorization: Bearer <token>" -o report.html
+```
+
 ---
 
-## 🏗️ 项目架构
+## 📁 项目结构
 
 ```
-app/
-├── api/             # FastAPI 路由层
-├── models/          # SQLAlchemy ORM 模型
-├── schemas/         # Pydantic 请求/响应模型
-├── services/        # 业务逻辑层
-├── rag/             # RAG 核心（嵌入/分块/向量库/管线/链/Hybrid 检索）
-├── workflows/       # 业务流程引擎
-└── streamlit_app/   # Streamlit 前端
-
-docs/               # 详细架构文档
-├── architecture.md  # 技术方案文档
-└── RAG.md           # RAG 检索流程详解（含 mermaid 图）
+zz-demand-system/
+├── app/
+│   ├── api/                        # FastAPI 路由层
+│   ├── middleware/                  # CORS / 限流 / Tracing
+│   ├── models/                     # SQLAlchemy ORM（auth/doc/conversation 等）
+│   ├── schemas/                    # Pydantic 请求/响应模型
+│   ├── services/                   # RAG + Workflow 业务逻辑
+│   ├── rag/                        # RAG 核心（Hybrid Retriever / LLM / Embedding / Pipeline）
+│   ├── workflows/                  # 业务流程引擎
+│   ├── cache/                      # 缓存层
+│   ├── streamlit_app/              # Streamlit 前端
+│   │   ├── app.py                  #   入口 + 页面路由
+│   │   ├── api_client.py           #   后端 HTTP 客户端（含 token 管理）
+│   │   ├── auth.py                 #   登录态管理
+│   │   └── views/
+│   │       ├── chat.py              #     💬 对话
+│   │       ├── documents.py        #     📁 文档管理
+│   │       ├── compliance.py       #     ⚖️ 合规审查（三路报告下载）
+│   │       ├── playbooks.py        #     📋 Playbook 规则库
+│   │       ├── knowledge.py        #     📚 法规知识库
+│   │       └── login.py            #     登录页
+│   └── compliance/                  # 合规审查模块
+│       ├── api/                    #   Reviews / Playbooks / Knowledge 路由
+│       ├── services/               #   ReviewService / PlaybookService / RegulationService
+│       ├── models/                  #   SQLAlchemy（review/playbook/regulation 等）
+│       ├── schemas/                 #   Pydantic 请求/响应
+│       ├── workflows/              #   LangGraph 图构建 + 状态定义
+│       ├── harness/                #   LangGraph 运行时 + Checkpointer + HITL
+│       ├── agents/                 #   Supervisor / Extractor / Reviewer / Researcher / Reporter
+│       │   └── prompts/             #     Prompt 模板（extractor_prompt 等）
+│       ├── skills/                  #   ParseSkill / PlaybookSkill / RiskSkill / RagSkill / ReportSkill
+│       ├── knowledge/               #   法规向量库 / 检索 / 种子数据 / 引用校验
+│       ├── parsing/                 #   文档解析 + 条款切分
+│       ├── playbook/                #   Playbook 规则引擎
+│       ├── reporting/               #   报告生成
+│       │   └── exporters/          #     Word (python-docx) / PDF (weasyprint)
+│       └── scripts/                 #   种子脚本
+├── alembic/                        # 数据库迁移
+├── docs/                           # 设计文档
+│   ├── architecture.md             #   端到端技术方案
+│   ├── RAG.md                      #   Hybrid RAG 详解
+│   ├── 拓展功能2期.md               #   合规审查技术设计
+│   └── review_chain.md             #   审查链路时序图
+├── data/                           # 运行时落盘
+│   └── compliance/reports/         #   审查报告（HTML/Word/PDF）
+├── start.sh                        # 一键启动脚本
+├── pyproject.toml                  # uv + 依赖管理
+└── alembic.ini
 ```
-
-详细架构设计见 [docs/architecture.md](docs/architecture.md)。
 
 ---
 
 ## 🔧 技术栈
 
-| 类别 | 技术 |
-|------|------|
-| **Web 框架** | FastAPI 0.115+ |
-| **UI 框架** | Streamlit 1.40+ |
-| **ORM** | SQLAlchemy 2.0+ |
-| **数据库迁移** | Alembic |
-| **向量数据库** | PGVector（bge-m3 1024d cosine） |
-| **RAG 框架** | LangChain 1.3+ |
-| **混合检索** | PG tsvector（默认稀疏后端）/ rank_bm25（内存 BM25 回退）+ jieba（中文分词） |
-| **重排器** | BAAI/bge-reranker-v2-m3（可选，需 transformers + torch） |
-| **认证** | JWT（python-jose）+ bcrypt |
-| **文档解析** | PyPDF, python-docx（docx2txt）, markdown |
-| **包管理** | uv |
+| 类别 | 技术 | 说明 |
+|------|------|------|
+| **Web 框架** | FastAPI 0.115+ | 异步 + OpenAPI 自动生成 |
+| **前端** | Streamlit 1.40+ | 纯 Python UI，5 页面 |
+| **ORM** | SQLAlchemy 2.0+ | |
+| **迁移** | Alembic | |
+| **认证** | JWT（python-jose）+ bcrypt | RBAC 三级角色 |
+| **向量库** | PGVector（bge-m3 1024d） | 两个独立 collection：`documents` 和 `compliance_regulations` |
+| **混合检索** | PG tsvector（默认）/ rank_bm25（回退）+ jieba | RRF 融合 |
+| **可选重排** | bge-reranker-v2-m3 | 需 transformers + torch |
+| **LLM / Embedding** | OpenAI 兼容协议 / Ollama / test mock | 配置化切换 |
+| **RAG 框架** | LangChain 1.3+ | |
+| **Agent 编排** | LangGraph | 多 Agent DAG + 状态管理 + Checkpointer |
+| **文档解析** | PyPDF / python-docx / docx2txt / markdown | |
+| **报告导出** | python-docx（Word）+ weasyprint（PDF） | 三路并行生成 |
+| **包管理** | uv | |
+| **中间件** | slowapi（限流）+ Tracing（request_id）+ CORS | |
 
 ---
 
 ## 📈 未来规划
 
-- [x] 流式输出（SSE）：提升 RAG 回答的用户体验（已基于 Streamlit 实现）
-- [x] OpenAPI 兼容第 3 方供应商（DeepSeek、通义千问、智谱等）预置配置（通过 `LLM_API_BASE` 自由切换）
-- [ ] LangGraph 工作流引擎：支持复杂 DAG 流程编排
+### RAG 核心
+- [x] 流式输出（SSE）
+- [x] OpenAPI 兼容第三方供应商（DeepSeek / 通义千问 / Ollama）
+- [x] Hybrid RAG（PGVector + tsvector + RRF）
+- [x] LangGraph 工作流引擎
 - [ ] 批量文档导入（文件夹上传）
 - [ ] 文档预览与在线编辑
-- [ ] 检索测试工具：查看给定问题的原始检索结果
+- [ ] 检索测试工具（给定问题查看原始检索结果）
+
+### 合规审查
+- [x] LangGraph 多 Agent 审查链路
+- [x] Playbook 规则库 CRUD
+- [x] 法规知识库 CRUD + 种子初始化 + 语义检索
+- [x] HTML + Word + PDF 三路报告生成
+- [x] 报告下载 API + Streamlit 前端
+- [x] HITL 人工审核（MVP）
+- [ ] 模板比对结果可视化
+- [ ] 版本差异审查（合同修改 diff）
+- [ ] 判例知识库（裁判文书入库 + 案例匹配）
+- [ ] 可观测性指标（审查耗时 / 各节点成功率 / 风险分布看板）
 - [ ] 更多测试覆盖（单元测试 / 集成测试）
-- [ ] 国际化（i18n）支持
 
 ---
 

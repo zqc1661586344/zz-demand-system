@@ -74,6 +74,7 @@ def get_llm():
             model=settings.ollama_model or "qwen2.5:7b",
             temperature=0.3,
             base_url=settings.ollama_base_url,
+            timeout=settings.llm_timeout_seconds,
         )
 
     else:

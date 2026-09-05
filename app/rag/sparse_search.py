@@ -6,8 +6,7 @@
   - 检索直接落在 PG，`to_tsvector('simple', search_text)` 的 GIN 表达式索引加速。
   - 多进程天然一致：每次查询读库即最新，无需 Redis 时间戳/进程内 LRU 缓存。
 
-仅在 `settings.database_url` 指向 PostgreSQL 时可用；SQLite 开发环境由调用方回退
-到 `bm25_memory`（见 `retrievers.py::hybrid_search`）。
+仅在 `settings.database_url` 指向 PostgreSQL 时可用；SQLite 开发环境由调用方回退到 `bm25_memory`（见 `retrievers.py::hybrid_search`）。
 """
 
 import json
@@ -56,15 +55,9 @@ _STOP_WORDS = {
 def tokenize_query(query: str) -> str:
     """对查询做与索引一致的 jieba 分词并过滤停用词，空格 join。
 
-    索引侧存储的是 `" ".join(_chinese_tokenizer(content))`，查询侧必须用同样的分词，
-    否则 `simple` 全文配置下中文字符会被当作一个整体、无法与已切好的词条精确匹配。
-    停用词过滤能避免 `websearch_to_tsquery` 的 AND 语义下泛词拖低长 query 召回。
+    索引侧存储的是 `" ".join(_chinese_tokenizer(content))`，查询侧必须用同样的分词，否则 `simple` 全文配置下中文字符会被当作一个整体、无法与已切好的词条精确匹配。停用词过滤能避免 `websearch_to_tsquery` 的 AND 语义下泛词拖低长 query 召回。
     """
-    return " ".join(
-        t
-        for t in _chinese_tokenizer(query)
-        if t.strip().lower() not in _STOP_WORDS
-    )
+    return " ".join(t for t in _chinese_tokenizer(query) if t.strip().lower() not in _STOP_WORDS)
 
 
 def ensure_fts_index() -> None:
@@ -78,7 +71,7 @@ def ensure_fts_index() -> None:
     """
     if not is_pg_available():
         logger.info(
-            "database_url is not PostgreSQL — skip FTS GIN index (%s)", settings.database_url
+            f"database_url is not PostgreSQL — skip FTS GIN index ({settings.database_url})"
         )
         return
     try:
@@ -96,7 +89,7 @@ def ensure_fts_index() -> None:
             )
         logger.info("ensured search_text column + GIN FTS index on document_chunks")
     except Exception as e:  # noqa: BLE001 —— 补列/索引失败只影响检索性能，不应阻断应用启动
-        logger.warning("failed to ensure search_text column / GIN FTS index: %s", e)
+        logger.warning(f"failed to ensure search_text column/GIN FTS index: {e}")
 
 
 def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Document]:

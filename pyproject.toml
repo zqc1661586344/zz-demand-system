@@ -40,7 +40,15 @@ dependencies = [
 [project.optional-dependencies]
 postgres = ["asyncpg>=0.30.0"]
 ollama = ["langchain-ollama>=0.2.0"]
-langgraph = ["langgraph>=0.2.0"]
+langgraph = ["langgraph>=0.2.0", "langgraph-checkpoint-postgres>=2.0.0", "psycopg[binary]>=3.1.0"]
+# 文档合规审查模块（app/compliance/）：LangGraph 编排 + PostgresSaver 检查点（需 psycopg3）+
+# Jinja2 HTML 报告模板。weasyprint(PDF) 放 P1，MVP 用 Word(python-docx，已在基础依赖)+HTML。
+compliance = [
+    "langgraph>=0.2.0",
+    "langgraph-checkpoint-postgres>=2.0.0",
+    "psycopg[binary]>=3.1.0",
+    "jinja2>=3.1.0",
+]
 # bge-reranker 交叉编码器重排所需（默认 RAG_RERANK_ENABLED=false，不强制安装，
 # 单独装在服务器上往往因 torch/tokenizers 需本地编译而失败）
 rerank = ["transformers>=4.45.0", "torch>=2.0.0"]
