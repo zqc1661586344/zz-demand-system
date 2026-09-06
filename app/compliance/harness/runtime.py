@@ -62,11 +62,52 @@ def _thread_config(review_id: str) -> dict:
     return {"configurable": {"thread_id": f"review-{review_id}"}}
 
 
+def compute_reflect_quality(
+    clauses: list,
+    risks: list,
+    retry_count: int = 0,
+    avg_conf_override: float | None = None,
+) -> tuple[float, float, float]:
+    """纯函数：计算 reflect 阶段的 quality 评分（覆盖率 × 置信度 - 衰减）。
+
+    供 runtime.reflect 内部调用 + 单元测试直接 import。
+    返回 (quality, coverage_score, avg_confidence)。
+    """
+    if not clauses:
+        coverage_score = 0.2
+    else:
+        coverage_score = 1.0
+
+    if avg_conf_override is not None:
+        avg_conf = avg_conf_override
+    elif risks:
+        confs = [float(r.get("ai_confidence") or 1.0) for r in risks]
+        avg_conf = sum(confs) / len(confs)
+    elif clauses:
+        avg_conf = 0.9
+    else:
+        avg_conf = 0.5
+
+    decay = max(0.0, 0.15 * retry_count)
+    quality = max(0.1, (coverage_score * 0.5 + avg_conf * 0.5) - decay)
+    return quality, coverage_score, avg_conf
+
+
 class ComplianceHarness:
     """审查工作流运行时：图构建(checkpointer) + 节点路由 + 状态落库。"""
 
     def __init__(self):
         self.checkpointer = build_checkpointer()
+        self.checkpointer_type = self._detect_checkpointer_type(self.checkpointer)
+        if self.checkpointer_type == "memory":
+            logger.warning(
+                "checkpointer=InMemorySaver — HITL resume WILL fail after process restart. "
+                "Configure PostgreSQL (database_url or vector_store_url with postgresql://) for production."
+            )
+        elif self.checkpointer_type == "none":
+            logger.warning(
+                "checkpointer=None (langgraph not installed) — graph compiles but HITL resume disabled."
+            )
         # 延迟导入避免循环依赖（review_graph 需要 import 本类作类型）
         from app.compliance.workflows.review_graph import build_review_graph
 
@@ -81,6 +122,18 @@ class ComplianceHarness:
         self._rag_skill = RagSkill()
         self._risk_skill = RiskSkill()
         self._report_skill = ReportSkill()
+
+    @staticmethod
+    def _detect_checkpointer_type(cp) -> str:
+        """识别 checkpointer 实际类型，返回 'postgres' / 'memory' / 'none'。"""
+        if cp is None:
+            return "none"
+        cls_name = type(cp).__name__
+        if "Postgres" in cls_name:
+            return "postgres"
+        if "InMemory" in cls_name or "Memory" in cls_name:
+            return "memory"
+        return "unknown"
 
     # ===================== 状态落库 =====================
 
@@ -372,26 +425,64 @@ class ComplianceHarness:
         return {**state, "risks": risks, "status": STATUS_REVIEWING}
 
     def _enrich_references_with_rag(self, risks: list[dict]) -> list[dict]:
-        """对 risks 的 legal_references 做法规检索 + 引用校验（空库/异常降级不阻断）。"""
+        """对 risks 的 legal_references 做法规检索 + 引用校验（空库/异常降级不阻断）。
+
+        三种情况：
+          1. refs 已有内容 → 检索候选池 + 校验每条引用
+          2. refs 为空但有 query → 主动检索法规，取 top-3 作为补充依据注入（verified=True）
+          3. 无 query → 跳过
+        """
         if not risks:
             return risks
-        enriched_count = 0
+        verified_count = 0
+        supplemented_count = 0
         for risk in risks:
-            refs = risk.get("legal_references") or []
+            refs = list(risk.get("legal_references") or [])
             query = (risk.get("description") or risk.get("clause_number") or "").strip()
-            if not refs or not query:
+            if not query:
                 continue
-            rag_result = self._rag_skill.execute({"query": query, "references": refs})
-            if rag_result.get("ok"):
-                verified = (rag_result.get("data") or {}).get("references") or refs
-                risk["legal_references"] = verified
-                enriched_count += 1
+
+            if refs:
+                rag_result = self._rag_skill.execute({"query": query, "references": refs})
+                if rag_result.get("ok"):
+                    verified = (rag_result.get("data") or {}).get("references") or refs
+                    risk["legal_references"] = verified
+                    verified_count += 1
+                else:
+                    for ref in refs:
+                        ref.setdefault("verified", False)
+                        ref.setdefault("needs_human_check", True)
             else:
-                for ref in refs:
-                    ref.setdefault("verified", False)
-                    ref.setdefault("needs_human_check", True)
-        logger.info("rag enrichment: %d/%d risks verified", enriched_count, len(risks))
+                rag_result = self._rag_skill.execute({"query": query})
+                if rag_result.get("ok"):
+                    hits = (rag_result.get("data") or {}).get("hits") or []
+                    injected = self._rag_hits_to_references(hits[:3])
+                    if injected:
+                        risk["legal_references"] = injected
+                        supplemented_count += 1
+        logger.info(
+            "rag enrichment: verified=%d supplemented=%d total_risks=%d",
+            verified_count,
+            supplemented_count,
+            len(risks),
+        )
         return risks
+
+    @staticmethod
+    def _rag_hits_to_references(hits: list[dict]) -> list[dict]:
+        """把 RagSkill 返回的 hits 转成 legal_references 格式（默认 verified=True）。"""
+        refs = []
+        for h in hits:
+            refs.append(
+                {
+                    "ref_type": "regulation",
+                    "ref_name": h.get("title") or h.get("regulation_id") or "",
+                    "ref_article": h.get("article_number") or h.get("article_id") or "",
+                    "ref_content": h.get("content") or "",
+                    "verified": True,
+                }
+            )
+        return refs
 
     def reflect(self, state: dict) -> dict:
         """多维度自反思：覆盖率 + 置信度 + 重审衰减。"""
@@ -403,21 +494,9 @@ class ComplianceHarness:
         risks = state.get("risks") or []
         clauses = state.get("clauses") or []
 
-        if not clauses:
-            coverage_score = 0.2
-        else:
-            coverage_score = 1.0
-
-        if risks:
-            confs = [float(r.get("ai_confidence") or 1.0) for r in risks]
-            avg_conf = sum(confs) / len(confs)
-        elif clauses:
-            avg_conf = 0.9
-        else:
-            avg_conf = 0.5
-
-        decay = max(0.0, 0.15 * retry_count)
-        quality = max(0.1, (coverage_score * 0.5 + avg_conf * 0.5) - decay)
+        quality, coverage_score, avg_conf = compute_reflect_quality(
+            clauses, risks, retry_count=retry_count
+        )
         next_retry = retry_count + 1
 
         self._persist_status(state["review_id"], STATUS_REFLECTING, retry_count=next_retry)

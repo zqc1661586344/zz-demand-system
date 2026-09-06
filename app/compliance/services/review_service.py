@@ -32,6 +32,15 @@ from app.logging_config import get_logger
 logger = get_logger(__name__)
 
 
+def _is_doc_accessible(biz_doc, user_id: str) -> bool:
+    """判定 user_id 是否有权限审查 biz_doc（私有文档 owner / 共享文档任何人）。"""
+    if getattr(biz_doc, "uploaded_by", None) == user_id:
+        return True
+    if getattr(biz_doc, "visibility", None) == "shared":
+        return True
+    return False
+
+
 class ReviewService:
     """审查业务编排。"""
 
@@ -55,17 +64,20 @@ class ReviewService:
         Returns:
             (response, start_payload) — start_payload 给 BackgroundTasks 调用 harness。
         """
-        # 1) 校验业务文档存在
-        from app.models.document import Document
+        # 1) 校验业务文档存在 + 归属权限
+        from app.models.document import Document as BizDocument
 
-        biz_doc = db.query(Document).filter(Document.id == document_id).first()
+        biz_doc = db.query(BizDocument).filter(BizDocument.id == document_id).first()
         if biz_doc is None:
             raise ValueError(f"document {document_id} not found")
         if biz_doc.status != "indexed":
             raise ValueError(f"document {document_id} status='{biz_doc.status}', need 'indexed'")
 
-        file_path = getattr(biz_doc, "file_path", None) or getattr(biz_doc, "path", None)
-        mime_type = getattr(biz_doc, "mime_type", None) or "application/octet-stream"
+        if user_id and not _is_doc_accessible(biz_doc, user_id):
+            raise ValueError("forbidden: not your document and not shared")
+
+        file_path = biz_doc.file_path
+        mime_type = biz_doc.mime_type or "application/octet-stream"
         if not file_path:
             raise ValueError(f"document {document_id} has no file_path")
 
@@ -303,6 +315,8 @@ class ReviewService:
 
     # ============== 人工审核 ==============
 
+    VALID_HUMAN_ACTIONS = frozenset({"confirm", "modify_level", "edit_suggestion", "mark_false"})
+
     def human_action(
         self,
         *,
@@ -316,6 +330,10 @@ class ReviewService:
         note: Optional[str] = None,
     ) -> dict:
         """执行人工审核操作并留痕。"""
+        if action not in self.VALID_HUMAN_ACTIONS:
+            raise ValueError(
+                f"unknown action '{action}', must be one of {sorted(self.VALID_HUMAN_ACTIONS)}"
+            )
         now = datetime.now(timezone.utc)
         results = []
         for risk_id in risk_ids:
@@ -346,8 +364,6 @@ class ReviewService:
                 risk.human_decision = "modified"
             elif action == "mark_false":
                 risk.human_decision = "rejected"
-            else:
-                raise ValueError(f"unknown action: {action}")
 
             risk.human_reviewed_at = now
             risk.human_reviewed_by = operator_id

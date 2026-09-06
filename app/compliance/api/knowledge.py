@@ -102,62 +102,42 @@ def ingest_regulation(
     db: Session = Depends(get_db),
     _: User = Depends(require_roles("admin")),
 ):
-    """摄入一部法规 —— 可选：原文文件路径或直接传 articles 数组。"""
-
-    existing = (
-        db.query(ComplianceRegulation).filter(ComplianceRegulation.title == req.title).first()
-    )
-    if existing:
-        raise HTTPException(409, f"regulation already exists (id={existing.id})")
-
-    reg_id = str(uuid.uuid4())
-
-    r = ComplianceRegulation(
-        id=reg_id,
-        title=req.title,
-        regulation_type=req.regulation_type,
-        publish_date=_parse_date(req.publish_date),
-        effective_date=_parse_date(req.effective_date),
-        expire_date=_parse_date(req.expire_date),
-        status="active",
-        source=req.source,
-        file_path=req.file_path or None,
-        version=1,
-        created_at=datetime.now(timezone.utc),
-    )
-    db.add(r)
-
-    # articles 直接提供 —— 跳过文件解析
+    """摄入一部法规 —— 可选：原文文件路径或直接传 articles 数组。
+    统一走 knowledge_ingestion.ingest_regulation（幂等 + 向量化）。
+    """
     if req.articles:
-        _ingest_articles_json(db, reg_id, req.articles)
-        db.commit()
-        logger.info(
-            "Regulation ingested (inline articles): %s (%d articles)", req.title, len(req.articles)
-        )
-    elif req.file_path:
-        db.commit()
-        db.refresh(r)
         try:
-            knowledge_ingestion.ingest_from_file(
+            result = knowledge_ingestion.ingest_regulation(
+                title=req.title,
+                regulation_type=req.regulation_type,
+                articles=req.articles,
+                publish_date=req.publish_date,
+                effective_date=req.effective_date,
+                expire_date=req.expire_date,
+                source=req.source,
+                file_path=req.file_path,
+                db=db,
+            )
+        except Exception as exc:
+            logger.error("Regulation inline ingest failed: %s", exc)
+            raise HTTPException(500, f"ingest failed: {exc}") from exc
+    elif req.file_path:
+        try:
+            result = knowledge_ingestion.ingest_from_file(
                 req.file_path, req.title, req.regulation_type, db=db
             )
-            db.commit()
-            logger.info("Regulation ingested (from file): %s", req.title)
         except Exception as exc:
-            logger.error("Regulation ingest failed: %s", exc)
+            logger.error("Regulation file ingest failed: %s", exc)
             raise HTTPException(500, f"ingest failed: {exc}") from exc
     else:
-        db.commit()
-        logger.info("Regulation registered (no articles, to be filled): %s", req.title)
+        raise HTTPException(400, "either articles or file_path must be provided")
 
-    db.refresh(r)
-    count = (
-        db.query(ComplianceRegulationArticle)
-        .filter(ComplianceRegulationArticle.regulation_id == reg_id)
-        .count()
-    )
+    reg_id = result.get("regulation_id")
+    count = result.get("article_count", 0)
+    r = db.get(ComplianceRegulation, reg_id)
     resp = RegulationResponse.model_validate(r).model_dump()
     resp["article_count"] = count
+    logger.info("Regulation ingested: %s (%d articles)", req.title, count)
     return resp
 
 
@@ -215,48 +195,37 @@ def seed_regulations(
     db: Session = Depends(get_db),
     _: User = Depends(require_roles("admin")),
 ):
-    """从 app/compliance/knowledge/seed_data/labor_contract/ 批量加载种子法规。"""
+    """从 seed_data/labor_contract/ 批量加载种子法规（幂等 + 向量化）。"""
     seed_dir = Path(__file__).resolve().parent.parent / "knowledge" / "seed_data" / "labor_contract"
     if not seed_dir.exists():
         raise HTTPException(404, f"seed dir not found: {seed_dir}")
 
     loaded = 0
-    skipped = 0
+    failed = 0
     for f in sorted(seed_dir.glob("*.json")):
         try:
             data = json.loads(f.read_text(encoding="utf-8"))
         except Exception as exc:
             logger.error("Seed JSON parse error %s: %s", f.name, exc)
+            failed += 1
             continue
+        try:
+            knowledge_ingestion.ingest_regulation(
+                title=data.get("title", f.stem),
+                regulation_type=data.get("regulation_type", "law"),
+                articles=data.get("articles", []),
+                publish_date=data.get("publish_date"),
+                effective_date=data.get("effective_date"),
+                source=data.get("source"),
+                db=db,
+            )
+            loaded += 1
+        except Exception as exc:
+            logger.error("Seed ingest failed %s: %s", f.name, exc)
+            failed += 1
 
-        existing = (
-            db.query(ComplianceRegulation)
-            .filter(ComplianceRegulation.title == data.get("title"))
-            .first()
-        )
-        if existing:
-            skipped += 1
-            continue
-
-        reg_id = str(uuid.uuid4())
-        r = ComplianceRegulation(
-            id=reg_id,
-            title=data.get("title", f.stem),
-            regulation_type=data.get("regulation_type", "law"),
-            publish_date=_parse_date(data.get("publish_date")),
-            effective_date=_parse_date(data.get("effective_date")),
-            source=data.get("source"),
-            status="active",
-            version=1,
-            created_at=datetime.now(timezone.utc),
-        )
-        db.add(r)
-        _ingest_articles_json(db, reg_id, data.get("articles", []))
-        loaded += 1
-
-    db.commit()
-    logger.info("Seed regulations: loaded=%d skipped=%d", loaded, skipped)
-    return {"ok": True, "loaded": loaded, "skipped": skipped}
+    logger.info("Seed regulations: loaded=%d failed=%d", loaded, failed)
+    return {"ok": True, "loaded": loaded, "failed": failed}
 
 
 # ─── 内部辅助 ────────────────────────────────────────────────────────────────────

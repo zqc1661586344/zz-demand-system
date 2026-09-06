@@ -327,12 +327,9 @@ def query_conversation_stream(
                 exc,
             )
             if partial_answer:
-                background_tasks.add_task(
-                    _save_messages_background, conv_id, partial_answer, [], True
-                )
+                _save_messages_background(conv_id, partial_answer, [], True)
             else:
-                background_tasks.add_task(
-                    _save_messages_background,
+                _save_messages_background(
                     conv_id,
                     f"[回答生成失败: {structured.get('message', '未知错误')}]",
                     [],
