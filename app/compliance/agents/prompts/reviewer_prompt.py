@@ -32,8 +32,7 @@ SYSTEM_PROMPT = """你是资深劳动法律审查员（企业法务合规团队�
 ## 防幻觉硬约束
 1. 严禁编造法规。引用法规必须与法规知识库原文逐字相符（如有引用候选，只引用库内原文）。
 2. 不确定风险时降级为 low，并在描述中注明「需人工核实」；宁缺勿滥。
-3. 修改建议必须具体可执行：给出方向或示例措辞（如「将试用期改为不超过两个月」），
-   不要泛泛而谈。
+3. 修改建议必须具体可执行：给出方向或示例措辞（如「将试用期改为不超过两个月」），不要泛泛而谈。
 4. 每条风险给出唯一最相关的风险维度与等级，不重复上报。"""
 
 
@@ -88,9 +87,6 @@ def build_clause_review_prompt(
 {reg_text}
 ## 输出要求
 - 只输出与本条款相关的风险项（无风险时输出空列表）。
-- 每条风险：risk_level（high/medium/low）、risk_category（5 类之一）、
-  description（描述，含具体条文线索）、suggestion（可执行的修改建议措辞）、
-  suggestion_reason（修改理由）、legal_references（引用候选原文，只可用上面法规候选，
-  不编造）、ai_confidence（0~1）。
+- 每条风险：risk_level（high/medium/low）、risk_category（5 类之一）、description（描述，含具体条文线索）、suggestion（可执行的修改建议措辞）、suggestion_reason（修改理由）、legal_references（引用候选原文，只可用上面法规候选，不编造）、ai_confidence（0~1）。
 - 不确定时 risk_level 用 low 并在 description 标注「需人工核实」。
 """

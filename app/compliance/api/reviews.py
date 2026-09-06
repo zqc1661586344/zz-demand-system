@@ -1,4 +1,4 @@
-"""Compliance Reviews API — 审查任务 CRUD + 启动 + 人工审核 + 报告下载。"""
+"""Compliance Reviews API — 审查任务 CRUD + 启动 + 人工审核 + 报告下载."""
 
 from pathlib import Path
 
@@ -14,7 +14,9 @@ from app.logging_config import get_logger
 from app.middleware.rate_limit import get_limiter
 from app.models.user import User
 from app.schemas.common import PaginatedResponse
+from app.compliance.models.report import ComplianceReport
 from app.compliance.models.review import ComplianceReview
+from app.compliance.models.document import ComplianceDocument
 from app.compliance.schemas.review import (
     HumanReviewRequest,
     ReviewCreateRequest,
@@ -25,6 +27,24 @@ router = APIRouter(prefix="/api/compliance/reviews", tags=["compliance-reviews"]
 limiter = get_limiter()
 
 
+def _assert_review_access(db: Session, review_id: str, user: User) -> ComplianceReview:
+    review = db.query(ComplianceReview).filter(ComplianceReview.id == review_id).first()
+    if review is None:
+        raise HTTPException(status_code=404, detail="review not found")
+    if not user.is_superuser and review.created_by != user.id:
+        raise HTTPException(status_code=403, detail="forbidden: not your review")
+    return review
+
+
+def _assert_document_access(db: Session, document_id: str, user: User) -> ComplianceDocument:
+    doc = db.query(ComplianceDocument).filter(ComplianceDocument.id == document_id).first()
+    if doc is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    if not user.is_superuser and doc.uploaded_by != user.id:
+        raise HTTPException(status_code=403, detail="forbidden: not your document")
+    return doc
+
+
 @router.post("", response_model_exclude_none=True)
 @limiter.limit("10/minute")
 def create_review(
@@ -32,8 +52,9 @@ def create_review(
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
-    request: Request = None,  # noqa: ARG001 — 供 slowapi rate-limit 取 client
+    request: Request = None,  # noqa: ARG001
 ):
+    _assert_document_access(db, req.document_id, current_user)
     service = ReviewService()
     original_filename = getattr(req, "original_filename", None) or f"doc-{req.document_id}"
     try:
@@ -79,6 +100,7 @@ def get_review(
     current_user: User = Depends(get_current_user),
     request: Request = None,  # noqa: ARG001
 ):
+    _assert_review_access(db, review_id, current_user)
     service = ReviewService()
     detail = service.get_review(db=db, review_id=review_id)
     if detail is None:
@@ -94,6 +116,7 @@ def delete_review(
     current_user: User = Depends(get_current_user),
     request: Request = None,  # noqa: ARG001
 ):
+    _assert_review_access(db, review_id, current_user)
     service = ReviewService()
     ok = service.delete_review(db=db, review_id=review_id)
     if not ok:
@@ -110,6 +133,7 @@ def human_review(
     current_user: User = Depends(get_current_user),
     request: Request = None,  # noqa: ARG001
 ):
+    _assert_review_access(db, review_id, current_user)
     service = ReviewService()
     try:
         result = service.human_action(
@@ -140,39 +164,45 @@ _MIME_MAP = {
 def download_report(
     review_id: str,
     format: str = "html",
-    db: Session = Depends(get_db),  # noqa: ARG001 — 鉴权用
-    current_user: User = Depends(get_current_user),  # noqa: ARG001
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
     request: Request = None,  # noqa: ARG001
 ):
-    """下载审查报告（P1）：扫描 report_dir 返回最新匹配文件。
+    review = _assert_review_access(db, review_id, current_user)
 
-    Args:
-        review_id: 审查任务 id。
-        format: html | word | pdf。
-    """
     ext = _FORMAT_EXT.get(format)
     if ext is None:
         raise HTTPException(status_code=400, detail=f"unsupported format: {format}")
 
-    report_dir = Path(settings.compliance_report_dir)
-    if not report_dir.is_dir():
-        raise HTTPException(status_code=404, detail="report directory not ready")
-
-    prefix = f"review-{review_id}-"
-    candidates = sorted(
-        report_dir.glob(f"{prefix}*{ext}"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
+    report = (
+        db.query(ComplianceReport)
+        .filter(ComplianceReport.review_id == review.id, ComplianceReport.format == format)
+        .order_by(ComplianceReport.generated_at.desc())
+        .first()
     )
-    if not candidates:
-        raise HTTPException(
-            status_code=404,
-            detail=f"no {format} report found for review {review_id}",
-        )
 
-    latest = candidates[0]
-    return FileResponse(
-        path=str(latest),
-        media_type=_MIME_MAP.get(ext, "application/octet-stream"),
-        filename=latest.name,
+    report_dir = Path(settings.compliance_report_dir).resolve()
+    if report is not None and report.file_path:
+        candidate = Path(report.file_path).resolve()
+        try:
+            candidate.relative_to(report_dir)
+        except ValueError as exc:
+            raise HTTPException(status_code=500, detail="report path out of jail") from exc
+        if candidate.is_file():
+            _final_name = candidate.name
+            if format == "html":
+                _final_name = f"compliance-report-{review.id}.html"
+            return FileResponse(
+                path=str(candidate),
+                media_type=_MIME_MAP.get(ext, "application/octet-stream"),
+                filename=_final_name,
+                headers={
+                    "X-Content-Type-Options": "nosniff",
+                    "Content-Disposition": f'attachment; filename="{_final_name}"',
+                },
+            )
+
+    raise HTTPException(
+        status_code=404,
+        detail=f"no {format} report found for review {review.id}",
     )

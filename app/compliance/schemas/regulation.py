@@ -1,9 +1,21 @@
 """Compliance regulation schemas — Pydantic models for regulation knowledge base API."""
 
 from datetime import date, datetime
+from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+
+_ALLOWED_REGULATION_SUFFIXES = {
+    ".pdf",
+    ".txt",
+    ".md",
+    ".docx",
+    ".html",
+    ".csv",
+    ".toml",
+}
 
 
 class RegulationIngestRequest(BaseModel):
@@ -15,12 +27,38 @@ class RegulationIngestRequest(BaseModel):
 
     title: str
     regulation_type: str = "law"  # law / admin_regulation / judicial_interpretation / local_rule
-    file_path: str = ""  # 已上传的法规原文文件路径（可选）
+    file_path: str = ""  # 已上传的法规原文文件路径（可选，必须在 regulation_dir 内）
     publish_date: Optional[str] = None
     effective_date: Optional[str] = None
     expire_date: Optional[str] = None
     source: Optional[str] = None
     articles: list[dict] | None = None  # [{article_number, chapter, section, content}]
+
+    @field_validator("file_path")
+    @classmethod
+    def _validate_file_path(cls, v: str) -> str:
+        if not v:
+            return v
+        from app.config import settings
+
+        base = Path(settings.compliance_regulation_dir).resolve()
+        target = Path(v).resolve()
+        try:
+            target.relative_to(base)
+        except ValueError as exc:
+            raise ValueError(
+                f"file_path must be inside compliance_regulation_dir ({base}): got {target}"
+            ) from exc
+        if not target.exists():
+            raise ValueError(f"file_path does not exist: {target}")
+        if target.is_symlink():
+            raise ValueError(f"file_path must not be a symlink: {target}")
+        if target.suffix.lower() not in _ALLOWED_REGULATION_SUFFIXES:
+            raise ValueError(
+                f"file_path has unsupported suffix {target.suffix!r}; "
+                f"allowed: {sorted(_ALLOWED_REGULATION_SUFFIXES)}"
+            )
+        return v
 
 
 class RegulationArticleResponse(BaseModel):

@@ -28,8 +28,7 @@ def _is_pg_url(url: str) -> bool:
 def normalize_pg_dsn(url: str) -> str:
     """把 langchain-postgres 风格的 `postgresql+psycopg://` 规范化为纯 `postgresql://`。
 
-    PostgresSaver 走 psycopg3，accept `postgresql://`；`+psycopg` 驱动后缀是
-    psycopg2/asyncpg 扩展，需去掉。
+    PostgresSaver 走 psycopg3，accept `postgresql://`；`+psycopg` 驱动后缀是 psycopg2/asyncpg 扩展，需去掉。
     """
     if url.startswith("postgresql+"):
         return url.replace("postgresql+", "postgresql", 1)

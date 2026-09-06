@@ -3,8 +3,7 @@
 抽取 KeyInfo 时使用的提示词模板，供 extractor._extract_with_llm 调用。
 """
 
-EXTRACT_KEY_INFO_PROMPT = """请从以下合同全文提取关键信息字段。
-只输出有明确内容的字段，无内容留空。
+EXTRACT_KEY_INFO_PROMPT = """请从以下合同全文提取关键信息字段。只输出有明确内容的字段，无内容留空。
 
 合同全文：
 {raw_text}

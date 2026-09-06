@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 from app.config import settings
 from app.database import get_db
 from app.logging_config import get_logger
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, require_roles
 from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.compliance.knowledge import ingestion as knowledge_ingestion
@@ -99,7 +99,7 @@ def get_regulation(
 def ingest_regulation(
     req: RegulationIngestRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    _: User = Depends(require_roles("admin")),
 ):
     """摄入一部法规 —— 可选：原文文件路径或直接传 articles 数组。"""
 
@@ -164,7 +164,7 @@ def ingest_regulation(
 def delete_regulation(
     regulation_id: str,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_roles("admin")),
 ):
     r = db.get(ComplianceRegulation, regulation_id)
     if not r:
@@ -208,7 +208,7 @@ def search_regulations(
 @router.post("/seed")
 def seed_regulations(
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_roles("admin")),
 ):
     """从 app/compliance/knowledge/seed_data/labor_contract/ 批量加载种子法规。"""
     seed_dir = Path(__file__).resolve().parent.parent / "knowledge" / "seed_data" / "labor_contract"

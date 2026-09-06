@@ -93,9 +93,7 @@ def ingest_regulation(
     try:
         # 幂等：同名法规已存在则先清理（含向量 + 条款表行），避免累积/重复召回
         existing = (
-            session.query(ComplianceRegulation)
-            .filter(ComplianceRegulation.title == title)
-            .first()
+            session.query(ComplianceRegulation).filter(ComplianceRegulation.title == title).first()
         )
         if existing:
             delete_regulations_from_store(str(existing.id))
@@ -161,9 +159,7 @@ def ingest_from_file(
     为空 JSON articles 时走 ingest_regulation 的纯结构化路径。）
     """
     # 延迟 import，避免循环依赖（ingestion → parsing → rag.pipeline）
-    from app.compliance.parsing.clause_splitter import (
-        split_clauses_from_text,
-    )
+    from app.compliance.parsing.clause_splitter import split_clauses_from_text
 
     from app.rag.pipeline import load_document
 

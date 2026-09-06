@@ -17,6 +17,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from app.compliance.harness.runtime import ComplianceHarness, get_harness
+from app.compliance.models.clause import ComplianceClause, ComplianceKeyInfo
 from app.compliance.models.document import ComplianceDocument
 from app.compliance.models.playbook import CompliancePlaybook
 from app.compliance.models.report import ComplianceHumanAction
@@ -26,7 +27,6 @@ from app.compliance.models.review import (
     ComplianceReview,
 )
 from app.compliance.schemas.review import ReviewDetailResponse, ReviewCreateResponse
-from app.database import SessionLocal
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -203,7 +203,7 @@ class ReviewService:
         ]
 
     def get_review(self, *, db: Session, review_id: str) -> Optional[ReviewDetailResponse]:
-        """查询完整审查详情（含风险 + 引用 + 关键信息）。"""
+        """查询完整审查详情（含风险 + 引用 + 条款号 + 关键信息）。"""
         review = db.query(ComplianceReview).filter(ComplianceReview.id == review_id).first()
         if review is None:
             return None
@@ -213,6 +213,21 @@ class ReviewService:
             .filter(ComplianceDocument.id == review.compliance_doc_id)
             .first()
         )
+
+        clause_rows = (
+            db.query(ComplianceClause)
+            .filter(ComplianceClause.compliance_doc_id == review.compliance_doc_id)
+            .order_by(ComplianceClause.sort_order.asc())
+            .all()
+        )
+        clause_map: dict[str, ComplianceClause] = {c.id: c for c in clause_rows}
+
+        ki_rows = (
+            db.query(ComplianceKeyInfo)
+            .filter(ComplianceKeyInfo.compliance_doc_id == review.compliance_doc_id)
+            .all()
+        )
+        key_info: dict[str, str] = {ki.field_key: ki.field_value or "" for ki in ki_rows}
 
         risks = (
             db.query(ComplianceRisk)
@@ -234,12 +249,15 @@ class ReviewService:
 
         risk_responses = []
         for r in risks:
+            clause = clause_map.get(r.clause_id) if r.clause_id else None
             refs = ref_map.get(r.id, [])
             risk_responses.append(
                 {
                     "id": r.id,
-                    "clause_number": None,  # clause 映射可扩展
-                    "clause_content": None,
+                    "clause_number": clause.clause_number if clause else None,
+                    "clause_content": (clause.content[:200] + "...")
+                    if clause and clause.content
+                    else None,
                     "risk_level": r.risk_level,
                     "risk_category": r.risk_category,
                     "description": r.description,
@@ -267,7 +285,7 @@ class ReviewService:
             document_id=comp_doc.document_id if comp_doc else "",
             status=review.status,
             doc_type=comp_doc.doc_type if comp_doc else None,
-            key_info={},  # MVP 可由 extractor 节点落库后回填
+            key_info=key_info,
             high_risk_count=review.high_risk_count or 0,
             medium_risk_count=review.medium_risk_count or 0,
             low_risk_count=review.low_risk_count or 0,
@@ -303,7 +321,14 @@ class ReviewService:
         now = datetime.now(timezone.utc)
         results = []
         for risk_id in risk_ids:
-            risk = db.query(ComplianceRisk).filter(ComplianceRisk.id == risk_id).first()
+            risk = (
+                db.query(ComplianceRisk)
+                .filter(
+                    ComplianceRisk.id == risk_id,
+                    ComplianceRisk.review_id == review_id,
+                )
+                .first()
+            )
             if risk is None:
                 results.append({"risk_id": risk_id, "ok": False, "error": "not found"})
                 continue
@@ -324,7 +349,6 @@ class ReviewService:
             elif action == "mark_false":
                 risk.human_decision = "rejected"
             else:
-                db.close()
                 raise ValueError(f"unknown action: {action}")
 
             risk.human_reviewed_at = now

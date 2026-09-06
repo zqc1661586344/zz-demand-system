@@ -83,8 +83,7 @@ def _refine_with_llm(clauses: list[dict], llm) -> list[dict]:
     """LLM 校正续拆（预留）：对过长的条款进一步拆分子款 / 标注类型。
 
     MVP 阶段仅预留钩子；本函数当前做保守合并：
-      - 单条约 2000 字以上记一条 warning，不做自动拆分（交由 extractor 在条款内处理）。
-    test / 环境无 LLM 时直接原样返回（确保测试确定性）。
+      - 单条约 2000 字以上记一条 warning，不做自动拆分（交由 extractor 在条款内处理）。test / 环境无 LLM 时直接原样返回（确保测试确定性）。
     """
     for c in clauses:
         if len(c["content"]) > 2000:

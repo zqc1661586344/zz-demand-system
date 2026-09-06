@@ -38,7 +38,11 @@ def build_review_graph(harness: ComplianceHarness) -> StateGraph:
 
     # ---- 入口与主线 ----
     g.set_entry_point("parse")
-    g.add_edge("parse", "supervise")
+    g.add_conditional_edges(
+        "parse",
+        lambda state: "continue" if state.get("status") != "failed" else "end",
+        {"continue": "supervise", "end": END},
+    )
     g.add_edge("supervise", "extract")
     g.add_edge("extract", "review")
 
