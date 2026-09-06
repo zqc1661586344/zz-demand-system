@@ -45,6 +45,7 @@ class ClauseType(str, Enum):
 
 # ---------------- 条款与关键信息（LLM 结构化输出） ----------------
 
+
 class Clause(BaseModel):
     clause_number: str = Field(description="条款号，如'第3条第2款'")
     clause_type: ClauseType
@@ -69,6 +70,7 @@ class KeyInfo(BaseModel):
 
 # ---------------- 风险识别（LLM 结构化输出） ----------------
 
+
 class LegalReference(BaseModel):
     ref_type: str = Field(description="regulation/judicial_case")
     ref_name: str
@@ -77,6 +79,10 @@ class LegalReference(BaseModel):
 
 
 class RiskItem(BaseModel):
+    id: Optional[str] = None
+    clause_id: Optional[str] = None
+    playbook_rule_id: Optional[str] = None
+    playbook_rule_name: Optional[str] = None
     clause_number: str
     risk_level: RiskLevel
     risk_category: RiskCategory
@@ -96,6 +102,7 @@ class ReviewResult(BaseModel):
 
 
 # ---------------- API 请求 / 响应 ----------------
+
 
 class ReviewCreateRequest(BaseModel):
     document_id: str

@@ -26,13 +26,14 @@ def _is_pg_url(url: str) -> bool:
 
 
 def normalize_pg_dsn(url: str) -> str:
-    """把 langchain-postgres 风格的 `postgresql+psycopg://` 规范化为纯 `postgresql://`。
+    """把带驱动后缀的 `postgresql+psycopg://` / `postgresql+psycopg2://` 规范化为 `postgresql://`。
 
-    PostgresSaver 走 psycopg3，accept `postgresql://`；`+psycopg` 驱动后缀是 psycopg2/asyncpg 扩展，需去掉。
+    PostgresSaver 走 psycopg3，只认 `postgresql://` 前缀；`+psycopg`/`+psycopg2` 是
+    SQLAlchemy 驱动后缀，需要完整移除才能被 psycopg_pool 正确解析。
     """
-    if url.startswith("postgresql+"):
-        return url.replace("postgresql+", "postgresql", 1)
-    return url
+    import re
+
+    return re.sub(r"^postgresql\+\w+:", "postgresql:", url, count=1)
 
 
 def _preferred_pg_url() -> str | None:
@@ -47,14 +48,19 @@ def _preferred_pg_url() -> str | None:
 def build_checkpointer():
     """构建 checkpointer（三级回退：PostgresSaver → InMemorySaver → None）。
 
-    Returns:
-        PostgresSaver（PG 可用且 langgraph-checkpoint-postgres + psycopg3 已装）
-        或 InMemorySaver（无 PG）或 None（langgraph 未装，不能断点恢复）。
+    PG 模式用 psycopg_pool 连接池（进程级常驻，不是上下文管理器）。
+    langgraph-checkpoint-postgres >= 3.0 的 PostgresSaver 接受 pool 对象直接构造，
+    而 from_conn_string() 返回的是 _GeneratorContextManager（必须 with 包裹），
+    被当作 PostgresSaver 实例调用 setup() 会抛 AttributeError —— 这是旧代码静默
+    失败、永远回退 InMemorySaver 的根因。
+
+    降级策略：
+      - production / use_celery_task=True：PG 初始化失败直接 raise，不静默降级
+      - 开发态（无 PG / SQLite）：回退 InMemorySaver，打 CRITICAL 日志提示风险
     """
-    # langgraph 未装 → None（审查仍可跑，无断点恢复）
     try:
         from langgraph.checkpoint.memory import InMemorySaver
-    except ImportError:  # langgraph 未装
+    except ImportError:
         logger.warning("langgraph not installed — checkpointer None")
         return None
 
@@ -62,20 +68,48 @@ def build_checkpointer():
     if pg_url:
         try:
             from langgraph.checkpoint.postgres import PostgresSaver
+            from psycopg_pool import ConnectionPool
 
-            conn_string = normalize_pg_dsn(pg_url)
-            saver = PostgresSaver.from_conn_string(conn_string)
-            saver.setup()  # 首次运行创建 checkpoint 表（幂等）
-            logger.info("checkpointer: PostgresSaver on %s", conn_string.split("@")[-1])
+            conn_info = normalize_pg_dsn(pg_url)
+            pool = ConnectionPool(
+                conninfo=conn_info,
+                min_size=2,
+                max_size=10,
+                kwargs={"autocommit": True, "row_factory": "dict_row"},
+            )
+            saver = PostgresSaver(pool)
+            saver.setup()
+            logger.info(
+                "checkpointer: PostgresSaver via psycopg_pool on %s (min=2 max=10)",
+                conn_info.split("@")[-1],
+            )
             return saver
-        except ImportError:
-            logger.warning("langgraph-checkpoint-postgres not installed — fall back InMemory")
-        except Exception as e:  # noqa: BLE001 — PG 连接失败不阻断启动
-            logger.warning("PostgresSaver setup failed (%s) — fall back InMemory", e)
+        except ImportError as e:
+            logger.warning("PostgresSaver deps missing (%s) — fall back InMemory", e)
+        except Exception as e:  # noqa: BLE001
+            is_prod = getattr(settings, "app_env", "") == "production" or getattr(
+                settings, "use_celery_task", False
+            )
+            if is_prod:
+                logger.critical(
+                    "PostgresSaver setup FAILED in production — raising to prevent silent "
+                    "data loss. Error: %s",
+                    e,
+                    exc_info=True,
+                )
+                raise
+            logger.critical(
+                "PostgresSaver setup failed (%s) — falling back InMemorySaver. "
+                "HITL resume WILL fail after restart! Fix PG connection before deploy.",
+                e,
+                exc_info=True,
+            )
 
-    # 无 PG 或 PostgresSaver 不可用 → InMemorySaver（test/SQLite 开发）
     saver = InMemorySaver()
-    logger.info("checkpointer: InMemorySaver (no PostgreSQL)")
+    logger.warning(
+        "checkpointer: InMemorySaver (no PostgreSQL). "
+        "HITL resume WILL fail after restart or across worker processes."
+    )
     return saver
 
 

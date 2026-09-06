@@ -1,6 +1,6 @@
 """Database engine and session configuration."""
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, event
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 from app.config import settings
@@ -13,11 +13,7 @@ class Base(DeclarativeBase):
 _db_url = settings.database_url or "sqlite:///./data/app.db"
 engine = create_engine(
     _db_url,
-    # echo 交由 logging_config 统一控制（_configure_logging 已将 sqlalchemy.* 设为 WARNING）
-    # 避免 Engine 在每次执行 SQL 时重置 logger 级别覆盖我们的配置
     echo=False,
-    # SQLite：check_same_thread=False 允许多线程读
-    # PostgreSQL：连接池配置
     **(
         {"connect_args": {"check_same_thread": False}}
         if "sqlite" in _db_url
@@ -29,6 +25,16 @@ engine = create_engine(
         }
     ),
 )
+
+
+if "sqlite" in _db_url:
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_foreign_keys(dbapi_connection, connection_record):
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON;")
+        cursor.close()
+
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 

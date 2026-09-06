@@ -59,7 +59,11 @@ class ComplianceRisk(Base):
         nullable=False,
         index=True,
     )
-    clause_id = Column(String(36), ForeignKey("compliance_clauses.id"), nullable=True)
+    clause_id = Column(
+        String(36),
+        ForeignKey("compliance_clauses.id", ondelete="SET NULL"),
+        nullable=True,
+    )
     risk_level = Column(String(10), nullable=False, index=True)  # high/medium/low
     # legality/equality/clarity/completeness/reasonableness
     risk_category = Column(String(30), nullable=False)

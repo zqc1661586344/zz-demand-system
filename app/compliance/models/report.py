@@ -44,4 +44,5 @@ class ComplianceHumanAction(Base):
     old_value = Column(Text, nullable=True)
     new_value = Column(Text, nullable=True)
     operator_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    note = Column(Text, nullable=True)
     created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc))

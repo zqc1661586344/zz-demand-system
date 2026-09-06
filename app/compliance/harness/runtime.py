@@ -5,10 +5,10 @@
 human_review/generate_report）、条件边（should_compare/should_retry）、状态落库
 （审查阶段写 compliance_reviews.status 与风险计数）。
 
-执行方式（MVP）：POST /reviews 创建任务后由 FastAPI BackgroundTasks 调用
-`start_review(...)`（同步，在线程池中跑）；`graph.stream(..., stream_mode="updates")`
-逐节点输出 → 每节点把阶段/计数写库 → 前端轮询 GET /reviews/{id}。SSE 端点用
-「DB 轮询生成器」推 `data: {json}` 事件（stream.py 格式化）。
+执行方式：POST /reviews 创建任务后由 FastAPI BackgroundTasks 或 Celery worker 调用
+`start_review(...)`；图节点按 LangGraph StateGraph 顺序执行，每节点把阶段/计数写库；
+前端轮询 GET /reviews/{id} 获取进度。含高风险时 human_review 节点先落库再进入 END，
+等待人工审核后通过 POST /reviews/{id}/resume 触发 generate_report 生成正式报告。
 
 图节点调用 skills（parse/playbook/rag/risk/report）与 agents（supervisor/extractor/
 reviewer/reporter），全部确定性路径 test 模式可跑通（mock）。引用校验由 rag_skill
@@ -67,16 +67,37 @@ def compute_reflect_quality(
     risks: list,
     retry_count: int = 0,
     avg_conf_override: float | None = None,
-) -> tuple[float, float, float]:
-    """纯函数：计算 reflect 阶段的 quality 评分（覆盖率 × 置信度 - 衰减）。
+    rules: list | None = None,
+) -> tuple[float, float, float, list[str]]:
+    """纯函数：计算 reflect 阶段的 quality 评分 + degraded 原因。
 
-    供 runtime.reflect 内部调用 + 单元测试直接 import。
-    返回 (quality, coverage_score, avg_confidence)。
+    关键修正：零 Playbook 规则场景 → coverage 打折、quality 上限封顶。
+    之前的公式会给"零规则 + 零风险合同"打 0.95 分（coverage=1.0 * 0.5 + avg_conf=0.9 * 0.5），
+    这在"没有任何规则可比对"的场景下是危险的自信 —— 等于"什么都没检查却说合规"。
+
+    返回 (quality, coverage_score, avg_confidence, degraded_reasons)。
     """
+    degraded: list[str] = []
+    rules_list = rules or []
+    has_rules = bool(rules_list)
+
     if not clauses:
         coverage_score = 0.2
+        degraded.append("no_clauses_extracted")
     else:
         coverage_score = 1.0
+
+    if not has_rules:
+        coverage_score *= 0.5
+        degraded.append("no_playbook_rules")
+
+    has_verified_ref = any(
+        any(ref.get("verified") for ref in (r.get("legal_references") or [])) for r in risks
+    )
+    if clauses and not risks:
+        coverage_score *= 0.9
+        if not has_rules:
+            degraded.append("llm_only_no_rules_no_risks")
 
     if avg_conf_override is not None:
         avg_conf = avg_conf_override
@@ -84,13 +105,20 @@ def compute_reflect_quality(
         confs = [float(r.get("ai_confidence") or 1.0) for r in risks]
         avg_conf = sum(confs) / len(confs)
     elif clauses:
-        avg_conf = 0.9
+        avg_conf = 0.9 if has_rules else 0.7
     else:
         avg_conf = 0.5
 
     decay = max(0.0, 0.15 * retry_count)
     quality = max(0.1, (coverage_score * 0.5 + avg_conf * 0.5) - decay)
-    return quality, coverage_score, avg_conf
+
+    if not has_rules:
+        quality = min(quality, 0.5)
+
+    if not degraded and not has_verified_ref:
+        degraded.append("no_verified_references")
+
+    return quality, coverage_score, avg_conf, degraded
 
 
 class ComplianceHarness:
@@ -192,15 +220,17 @@ class ComplianceHarness:
             existing_clause_ids = {
                 r[0]
                 for r in db.query(ComplianceClause.id)
-                .filter(ComplianceClause.compliance_doc_id == compliance_doc_id)
+                .filter(ComplianceClause.review_id == review_id)
                 .all()
             }
 
             clause_id_by_index: dict[int, str] = {}
+            clause_id_by_number: dict[str, str] = {}
             for idx, c in enumerate(clauses or []):
                 clause_id = str(_uuid.uuid4())
                 c_obj = ComplianceClause(
                     id=clause_id,
+                    review_id=review_id,
                     compliance_doc_id=compliance_doc_id,
                     clause_number=c.get("clause_number") or f"第{idx + 1}条",
                     clause_type=c.get("clause_type"),
@@ -211,6 +241,8 @@ class ComplianceHarness:
                 )
                 db.add(c_obj)
                 clause_id_by_index[idx] = clause_id
+                if c_obj.clause_number:
+                    clause_id_by_number[c_obj.clause_number] = clause_id
                 existing_clause_ids.discard(clause_id)
 
             for old_id in existing_clause_ids:
@@ -407,14 +439,39 @@ class ComplianceHarness:
         }
 
     def review_clauses(self, state: dict) -> dict:
-        """节点 review：Playbook 命中 → 风险识别（5 类 × 3 级）→ 法规 RAG 引用校验。"""
+        """节点 review：Playbook 命中 → 风险识别 → clause_id/rule_id 追溯注入 → RAG 引用校验。"""
         guarded = self._guard_failed(state)
         if guarded is not None:
             return guarded
         self._persist_status(state["review_id"], STATUS_REVIEWING)
         clauses = state.get("clauses") or []
-        rr = self._risk_skill.execute({"clauses": clauses, "rules": state.get("rules") or []})
-        risks = (rr.get("data") or {}).get("risks") if rr.get("ok") else []
+        rules = state.get("rules") or []
+
+        rr = self._risk_skill.execute({"clauses": clauses, "rules": rules})
+        raw_risks = (rr.get("data") or {}).get("risks") if rr.get("ok") else []
+
+        clauses_by_number = {(c.get("clause_number") or ""): c.get("clause_id") for c in clauses}
+        rules_by_category = {
+            (r.get("risk_category") or r.get("category") or ""): r.get("id") for r in rules
+        }
+        rules_by_name = {(r.get("name") or r.get("rule_name") or ""): r.get("id") for r in rules}
+
+        import uuid as _uuid
+
+        risks = []
+        for r in raw_risks:
+            risk = dict(r)
+            risk.setdefault("id", str(_uuid.uuid4()))
+            clause_number = risk.get("clause_number") or ""
+            if not risk.get("clause_id") and clause_number in clauses_by_number:
+                risk["clause_id"] = clauses_by_number[clause_number]
+            risk_category = risk.get("risk_category") or risk.get("category") or ""
+            if not risk.get("playbook_rule_id"):
+                risk["playbook_rule_id"] = rules_by_category.get(
+                    risk_category
+                ) or rules_by_name.get(risk_category)
+            risks.append(risk)
+
         risks = self._enrich_references_with_rag(risks)
         counts = {
             "high_risk_count": sum(1 for r in risks if r.get("risk_level") == "high"),
@@ -422,20 +479,31 @@ class ComplianceHarness:
             "low_risk_count": sum(1 for r in risks if r.get("risk_level") == "low"),
         }
         self._persist_status(state["review_id"], STATUS_REVIEWING, **counts)
+        logger.info(
+            "review_clauses: %d raw → %d enriched risks, clause_id resolved=%d rule_id resolved=%d",
+            len(raw_risks),
+            len(risks),
+            sum(1 for r in risks if r.get("clause_id")),
+            sum(1 for r in risks if r.get("playbook_rule_id")),
+        )
         return {**state, "risks": risks, "status": STATUS_REVIEWING}
 
     def _enrich_references_with_rag(self, risks: list[dict]) -> list[dict]:
         """对 risks 的 legal_references 做法规检索 + 引用校验（空库/异常降级不阻断）。
 
         三种情况：
-          1. refs 已有内容 → 检索候选池 + 校验每条引用
-          2. refs 为空但有 query → 主动检索法规，取 top-3 作为补充依据注入（verified=True）
+          1. refs 已有内容 → 检索候选池 + 校验每条引用（citation_verifier 判定 verified）
+          2. refs 为空但有 query → 主动检索法规，取 top-3 补充（verified=False, needs_human_check=True）
           3. 无 query → 跳过
+
+        重要：RAG 检索命中 ≠ 引用正确。检索拿到的是"候选依据"，法务需要人工确认。
+        只有 citation_verifier 判定通过的引用才会标 verified=True。
         """
         if not risks:
             return risks
         verified_count = 0
         supplemented_count = 0
+        low_score_filtered = 0
         for risk in risks:
             refs = list(risk.get("legal_references") or [])
             query = (risk.get("description") or risk.get("clause_number") or "").strip()
@@ -446,8 +514,12 @@ class ComplianceHarness:
                 rag_result = self._rag_skill.execute({"query": query, "references": refs})
                 if rag_result.get("ok"):
                     verified = (rag_result.get("data") or {}).get("references") or refs
+                    for ref in verified:
+                        if ref.get("verified"):
+                            verified_count += 1
+                        else:
+                            ref.setdefault("needs_human_check", True)
                     risk["legal_references"] = verified
-                    verified_count += 1
                 else:
                     for ref in refs:
                         ref.setdefault("verified", False)
@@ -460,32 +532,41 @@ class ComplianceHarness:
                     if injected:
                         risk["legal_references"] = injected
                         supplemented_count += 1
+                    low_score_filtered += max(0, len(hits) - 3)
         logger.info(
-            "rag enrichment: verified=%d supplemented=%d total_risks=%d",
+            "rag enrichment: verified=%d supplemented=%d filtered_low_score=%d total_risks=%d",
             verified_count,
             supplemented_count,
+            low_score_filtered,
             len(risks),
         )
         return risks
 
     @staticmethod
     def _rag_hits_to_references(hits: list[dict]) -> list[dict]:
-        """把 RagSkill 返回的 hits 转成 legal_references 格式（默认 verified=True）。"""
+        """把 RagSkill 返回的 hits 转成 legal_references 格式。
+
+        检索命中只是"候选法规依据"——默认 verified=False，需要 citation_verifier
+        后续判定或法务人工确认。这比无条件 verified=True 更诚实。
+        """
         refs = []
         for h in hits:
+            score = h.get("score") or h.get("similarity") or 0.0
             refs.append(
                 {
-                    "ref_type": "regulation",
+                    "ref_type": "regulation_retrieved",
                     "ref_name": h.get("title") or h.get("regulation_id") or "",
                     "ref_article": h.get("article_number") or h.get("article_id") or "",
                     "ref_content": h.get("content") or "",
-                    "verified": True,
+                    "verified": False,
+                    "needs_human_check": True,
+                    "retrieval_score": round(float(score), 4),
                 }
             )
         return refs
 
     def reflect(self, state: dict) -> dict:
-        """多维度自反思：覆盖率 + 置信度 + 重审衰减。"""
+        """多维度自反思：覆盖率 + 置信度 + 重审衰减 + 降级原因。"""
         guarded = self._guard_failed(state)
         if guarded is not None:
             return guarded
@@ -493,23 +574,27 @@ class ComplianceHarness:
         retry_count = int(state.get("retry_count") or 0)
         risks = state.get("risks") or []
         clauses = state.get("clauses") or []
+        rules = state.get("rules") or []
 
-        quality, coverage_score, avg_conf = compute_reflect_quality(
-            clauses, risks, retry_count=retry_count
+        quality, coverage_score, avg_conf, degraded = compute_reflect_quality(
+            clauses, risks, retry_count=retry_count, rules=rules
         )
         next_retry = retry_count + 1
 
         self._persist_status(state["review_id"], STATUS_REFLECTING, retry_count=next_retry)
         logger.info(
-            "reflect: q=%.2f cov=%.2f conf=%.2f retry=%d r=%d c=%d",
+            "reflect: q=%.2f cov=%.2f conf=%.2f retry=%d r=%d c=%d rules=%d degraded=%s",
             quality,
             coverage_score,
             avg_conf,
             retry_count,
             len(risks),
             len(clauses),
+            len(rules),
+            degraded,
         )
-        return {
+
+        result = {
             **state,
             "retry_count": next_retry,
             "quality_score": round(quality, 2),
@@ -517,6 +602,9 @@ class ComplianceHarness:
             "avg_confidence": round(avg_conf, 2),
             "status": STATUS_REFLECTING,
         }
+        if degraded:
+            result["degraded_reasons"] = degraded
+        return result
 
     def compare_template(self, state: dict) -> dict:
         """企业模板比对：复用 Playbook standard_position 做偏离检测 + 建议补全 + 红线升级。"""
@@ -577,20 +665,40 @@ class ComplianceHarness:
         return {**state, "risks": risks, "template_deviations": deviations, **counts}
 
     def human_review(self, state: dict) -> dict:
-        """节点 human_review：HITL 记录（MVP 简化，不真正 interrupt）。
+        """节点 human_review：HITL 阻塞落库后等待人工确认。
 
-        MVP：把高风险条款号标记为 pending_human 并在 compliance_human_actions 留痕（记录「等待人工确认」）；无论是否有 high 风险都继续 generate_report，不阻塞。
-        真正 interrupt/resume 留 P1（hitl.py 已备 build_resume_command）。
+        必须先落库（risks/clauses/key_info）再进入 END，否则 pending_human 状态下
+        前端拿不到任何风险明细 — 审查报告里最有价值的 high 风险会彻底消失。
+        resume_review 从 checkpoint 取 state 再调 generate_report 生成报告。
         """
         guarded = self._guard_failed(state)
         if guarded is not None:
             return guarded
-        self._persist_status(state["review_id"], STATUS_PENDING_HUMAN)
-        pending = [
-            r.get("clause_number")
-            for r in (state.get("risks") or [])
-            if r.get("risk_level") == "high"
-        ]
+        review_id = state["review_id"]
+        clauses = state.get("clauses") or []
+        risks = state.get("risks") or []
+        key_info = state.get("key_info") or {}
+        risk_counts = state.get("risk_counts") or {}
+        compliance_doc_id = state.get("compliance_doc_id") or ""
+
+        if risks or clauses:
+            self._persist_results(
+                review_id=review_id,
+                compliance_doc_id=compliance_doc_id,
+                clauses=clauses,
+                key_info=key_info,
+                risks=risks,
+                report_paths={},
+                risk_counts=risk_counts,
+            )
+            logger.info(
+                "human_review: persisted %d clauses / %d risks before blocking",
+                len(clauses),
+                len(risks),
+            )
+
+        self._persist_status(review_id, STATUS_PENDING_HUMAN)
+        pending = [r.get("clause_number") for r in risks if r.get("risk_level") == "high"]
         return {**state, "pending_human_review": pending, "status": STATUS_PENDING_HUMAN}
 
     def generate_report(self, state: dict) -> dict:
@@ -675,7 +783,7 @@ class ComplianceHarness:
         quality = float(state.get("quality_score") or 0.0)
         avg_conf = float(state.get("avg_confidence") or 0.5)
         retry = int(state.get("retry_count") or 0)
-        max_retry = int(settings.compliance_max_retry)
+        max_retry = int(settings.compliance_reflect_max_retry)
         low_conf = (
             avg_conf < 0.6 and (state.get("clauses") or []) and not (state.get("risks") or [])
         )
@@ -692,9 +800,9 @@ class ComplianceHarness:
     def resume_review(self, review_id: str) -> dict:
         """人工确认后续跑 generate_report（HITL resume 入口）。
 
-        从 checkpointer 加载 human_review 节点后的 state，手动调 generate_report。
-        checkpointer 为 None（langgraph 未装）或 state 丢失（进程重启 + InMemorySaver）
-        时返回错误，提示用户重新发起审查。
+        关键：generate_report 之前必须把 DB 中人工决策过的风险（risk_level 修改、
+        suggestion 重写、mark_false 剔除）合并回 state。否则报告里展示的仍是
+        LLM 原始输出，人工审核等于白做 — 这是 resume 最容易踩的坑。
         """
         config = _thread_config(review_id)
         if self.checkpointer is None:
@@ -716,6 +824,9 @@ class ComplianceHarness:
                 state = dict(state) if state else {}
             if state.get("review_id") != review_id:
                 state["review_id"] = review_id
+
+            state = self._merge_human_decisions(review_id, state)
+
             result = self.generate_report(state)
             return {
                 "thread_id": config["configurable"]["thread_id"],
@@ -731,6 +842,105 @@ class ComplianceHarness:
                 "error": str(e),
             }
 
+    def _merge_human_decisions(self, review_id: str, state: dict) -> dict:
+        """把 DB 中人工审核的修改合并回 checkpoint state 的 risks。
+
+        三种人工操作：
+          1. mark_false / human_decision="rejected" → 从 state.risks 中剔除
+          2. modify_level → 覆盖 risk_level，加 _human_modified=True
+          3. edit_suggestion → 覆盖 suggestion，加 _human_modified=True, _human_note=...
+
+        合并后重算 high/medium/low_risk_count，保证报告里的计数与展示一致。
+        """
+        try:
+            from app.database import SessionLocal
+            from app.compliance.models.review import ComplianceRisk
+
+            db = SessionLocal()
+            try:
+                db_risks = (
+                    db.query(ComplianceRisk).filter(ComplianceRisk.review_id == review_id).all()
+                )
+            finally:
+                db.close()
+        except Exception as e:  # noqa: BLE001
+            logger.warning("resume: cannot load human decisions from DB: %s", e)
+            return state
+
+        if not db_risks:
+            return state
+
+        db_by_id = {str(r.id): r for r in db_risks}
+        original_risks = list(state.get("risks") or [])
+        merged_risks = []
+        rejected_count = 0
+        modified_count = 0
+
+        for risk in original_risks:
+            rid = risk.get("id")
+            db_row = db_by_id.get(rid) if rid else None
+
+            if db_row is None:
+                merged_risks.append(risk)
+                continue
+
+            decision = (db_row.human_decision or "na").lower()
+            if decision in ("rejected", "false_positive", "mark_false"):
+                rejected_count += 1
+                logger.info("resume: filtering out risk %s (human_decision=%s)", rid, decision)
+                continue
+
+            merged = dict(risk)
+            changed = False
+
+            if db_row.risk_level and db_row.risk_level != merged.get("risk_level"):
+                merged["risk_level"] = db_row.risk_level
+                changed = True
+
+            if db_row.suggestion and db_row.suggestion != merged.get("suggestion"):
+                merged["suggestion"] = db_row.suggestion
+                changed = True
+
+            if db_row.description and db_row.description != merged.get("description"):
+                merged["description"] = db_row.description
+                changed = True
+
+            if db_row.human_note:
+                merged["_human_note"] = db_row.human_note
+                changed = True
+
+            if changed:
+                merged["_human_modified"] = True
+                modified_count += 1
+
+            merged_risks.append(merged)
+
+        counts = {"high": 0, "medium": 0, "low": 0}
+        for r in merged_risks:
+            lv = r.get("risk_level") or "medium"
+            counts[lv] = counts.get(lv, 0) + 1
+
+        logger.info(
+            "resume: merged human decisions — kept=%d rejected=%d modified=%d counts=%s",
+            len(merged_risks),
+            rejected_count,
+            modified_count,
+            counts,
+        )
+
+        return {
+            **state,
+            "risks": merged_risks,
+            "risk_counts": {
+                **(state.get("risk_counts") or {}),
+                **counts,
+                "total": len(merged_risks),
+            },
+            "human_decision_count": len(db_risks),
+            "human_rejected_count": rejected_count,
+            "human_modified_count": modified_count,
+        }
+
     def start_review(
         self,
         review_id: str,
@@ -741,6 +951,8 @@ class ComplianceHarness:
         user_id: Optional[str] = None,
         rules: Optional[list] = None,
         original_filename: str | None = None,
+        template_id: Optional[str] = None,
+        contract_type_override: Optional[str] = None,
     ) -> dict:
         """启动一次审查（同步，FastAPI BackgroundTasks 线程内调用）。
 
@@ -752,6 +964,8 @@ class ComplianceHarness:
             user_id: 发起人（落 created_by 由 service 写入，这里仅随 state 传入）。
             rules: 活跃 Playbook 规则（service 按合同类型过滤后喂入）。
             original_filename: 展示用原名（报告 doc_info）。
+            template_id: 合同模板 ID（compare 节点用）。
+            contract_type_override: 合同类型 override（影响 Playbook 规则筛选）。
 
         Returns:
             {"thread_id": ..., "status": 最终状态, "error": 可选项}
@@ -765,6 +979,8 @@ class ComplianceHarness:
             "user_id": user_id,
             "rules": rules or [],
             "original_filename": original_filename or "",
+            "template_id": template_id,
+            "contract_type": contract_type_override,
             "status": STATUS_PARSING,
             "retry_count": 0,
         }

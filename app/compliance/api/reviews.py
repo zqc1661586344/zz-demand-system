@@ -1,5 +1,7 @@
 """Compliance Reviews API — 审查任务 CRUD + 启动 + 人工审核 + 报告下载."""
 
+import json
+
 from pathlib import Path
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
@@ -9,12 +11,12 @@ from sqlalchemy.orm import Session
 from app.compliance.services.review_service import ReviewService
 from app.config import settings
 from app.database import get_db
-from app.dependencies import get_current_user
+from app.dependencies import get_current_user, require_roles
 from app.logging_config import get_logger
 from app.middleware.rate_limit import get_limiter
 from app.models.user import User
 from app.schemas.common import PaginatedResponse
-from app.compliance.models.report import ComplianceReport
+from app.compliance.models.report import ComplianceHumanAction, ComplianceReport
 from app.compliance.models.review import ComplianceReview
 from app.compliance.schemas.review import (
     HumanReviewRequest,
@@ -33,6 +35,21 @@ def _assert_review_access(db: Session, review_id: str, user: User) -> Compliance
     if not user.is_superuser and review.created_by != user.id:
         raise HTTPException(status_code=403, detail="forbidden: not your review")
     return review
+
+
+def _assert_doc_access_or_404(biz_doc, user_id: str) -> None:
+    from app.models.document import Document as BizDocument
+
+    if biz_doc is None:
+        raise HTTPException(status_code=404, detail="document not found")
+    if biz_doc.status != "indexed":
+        raise HTTPException(
+            status_code=400, detail=f"document status='{biz_doc.status}', need 'indexed'"
+        )
+    is_shared = getattr(biz_doc, "visibility", None) == "shared"
+    is_owner = getattr(biz_doc, "uploaded_by", None) == user_id
+    if user_id and not is_owner and not is_shared:
+        raise HTTPException(status_code=403, detail="forbidden: not your document and not shared")
 
 
 @router.post("", response_model_exclude_none=True)
@@ -58,11 +75,20 @@ def create_review(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    if settings.use_celery_task:
+    if settings.use_celery_task and settings.celery_broker_url:
         from app.compliance.tasks import run_compliance_review
 
-        run_compliance_review.delay(payload)
-        logger.info("review %s queued via celery for doc %s", response.review_id, req.document_id)
+        try:
+            run_compliance_review.delay(payload)
+            logger.info(
+                "review %s queued via celery for doc %s", response.review_id, req.document_id
+            )
+        except Exception as exc:  # noqa: BLE001 — broker 断连等投递失败降级
+            logger.warning("celery queue failed (%s) — fall back background_tasks", exc)
+            background_tasks.add_task(service.run_review, payload)
+            logger.info(
+                "review %s queued via background_tasks (celery fallback)", response.review_id
+            )
     else:
         background_tasks.add_task(service.run_review, payload)
         logger.info(
@@ -110,7 +136,7 @@ def get_review(
 def delete_review(
     review_id: str,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin", "legal")),
     request: Request = None,  # noqa: ARG001
 ):
     _assert_review_access(db, review_id, current_user)
@@ -127,10 +153,14 @@ def human_review(
     review_id: str,
     req: HumanReviewRequest,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin", "legal")),
     request: Request = None,  # noqa: ARG001
 ):
     _assert_review_access(db, review_id, current_user)
+    if not req.risk_ids:
+        raise HTTPException(status_code=400, detail="risk_ids is required")
+    if len(req.risk_ids) > 100:
+        raise HTTPException(status_code=400, detail="too many risk_ids (max 100)")
     service = ReviewService()
     try:
         result = service.human_action(
@@ -154,12 +184,12 @@ def resume_review(
     review_id: str,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_roles("admin", "legal")),
     request: Request = None,  # noqa: ARG001
 ):
     """人工确认后续跑 generate_report（HITL resume）。
 
-    仅当 review.status == pending_human 时可用。
+    仅当 review.status == pending_human 且至少存在一条人工决策记录时可用。
     """
     review = _assert_review_access(db, review_id, current_user)
     if review.status != "pending_human":
@@ -167,13 +197,40 @@ def resume_review(
             status_code=400,
             detail=f"review status is '{review.status}', expected 'pending_human' to resume",
         )
+
+    action_count = (
+        db.query(ComplianceHumanAction).filter(ComplianceHumanAction.review_id == review_id).count()
+    )
+    if action_count == 0:
+        from app.compliance.models.review import ComplianceRisk
+
+        untouched_high = (
+            db.query(ComplianceRisk)
+            .filter(
+                ComplianceRisk.review_id == review_id,
+                ComplianceRisk.risk_level == "high",
+                ComplianceRisk.human_decision == "na",
+            )
+            .count()
+        )
+        has_high = (review.high_risk_count or 0) > 0
+        if has_high and untouched_high > 0:
+            raise HTTPException(
+                status_code=409,
+                detail="no human review decisions recorded — please review high risks before resuming",
+            )
     from app.compliance.harness.runtime import get_harness
 
-    if settings.use_celery_task:
+    if settings.use_celery_task and settings.celery_broker_url:
         from app.compliance.tasks import resume_compliance_review
 
-        resume_compliance_review.delay(review_id)
-        logger.info("review %s resumed via celery by user %s", review_id, current_user.id)
+        try:
+            resume_compliance_review.delay(review_id)
+            logger.info("review %s resumed via celery by user %s", review_id, current_user.id)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("celery resume queue failed (%s) — fall back background_tasks", exc)
+            harness = get_harness()
+            background_tasks.add_task(harness.resume_review, review_id)
     else:
         harness = get_harness()
         background_tasks.add_task(harness.resume_review, review_id)

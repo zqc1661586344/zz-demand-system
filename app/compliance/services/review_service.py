@@ -10,6 +10,7 @@
 API 路由层只处理 FastAPI 请求体 → 调本 service → 用 ReviewDetailResponse 返回。
 """
 
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
@@ -45,7 +46,13 @@ class ReviewService:
     """审查业务编排。"""
 
     def __init__(self, harness: Optional[ComplianceHarness] = None):
-        self.harness = harness or get_harness()
+        self._harness = harness
+
+    @property
+    def harness(self) -> ComplianceHarness:
+        if self._harness is None:
+            self._harness = get_harness()
+        return self._harness
 
     # ============== 创建审查任务 ==============
 
@@ -139,7 +146,9 @@ class ReviewService:
             "mime_type": mime_type,
             "user_id": user_id,
             "rules": rules,
-            "original_filename": original_filename,
+            "original_filename": original_filename or getattr(biz_doc, "original_filename", None),
+            "template_id": template_id,
+            "contract_type_override": doc_type,
         }
         return response, start_payload
 
@@ -316,6 +325,7 @@ class ReviewService:
     # ============== 人工审核 ==============
 
     VALID_HUMAN_ACTIONS = frozenset({"confirm", "modify_level", "edit_suggestion", "mark_false"})
+    MAX_NOTE_LEN = 2000
 
     def human_action(
         self,
@@ -334,6 +344,21 @@ class ReviewService:
             raise ValueError(
                 f"unknown action '{action}', must be one of {sorted(self.VALID_HUMAN_ACTIONS)}"
             )
+        if action == "modify_level" and not new_risk_level:
+            raise ValueError("new_risk_level is required for 'modify_level'")
+        if action == "edit_suggestion" and not new_suggestion:
+            raise ValueError("new_suggestion is required for 'edit_suggestion'")
+        if note is not None and len(note) > self.MAX_NOTE_LEN:
+            raise ValueError(f"note exceeds max length {self.MAX_NOTE_LEN}")
+
+        if action == "modify_level":
+            from app.compliance.models.review import RiskLevel
+
+            if new_risk_level not in {e.value for e in RiskLevel}:
+                raise ValueError(
+                    f"invalid new_risk_level '{new_risk_level}', must be one of high/medium/low"
+                )
+
         now = datetime.now(timezone.utc)
         results = []
         for risk_id in risk_ids:
@@ -365,20 +390,49 @@ class ReviewService:
             elif action == "mark_false":
                 risk.human_decision = "rejected"
 
+            if note:
+                risk.human_note = note
+
             risk.human_reviewed_at = now
             risk.human_reviewed_by = operator_id
 
+            new_val = {"level": risk.risk_level, "suggestion": risk.suggestion}
             action_log = ComplianceHumanAction(
                 id=str(uuid.uuid4()),
                 review_id=review_id,
                 risk_id=risk_id,
                 action_type=action,
-                old_value=str(old_val),
-                new_value=str({"level": risk.risk_level, "suggestion": risk.suggestion}),
+                old_value=json.dumps(old_val, ensure_ascii=False, default=str),
+                new_value=json.dumps(new_val, ensure_ascii=False, default=str),
                 operator_id=operator_id,
+                note=note,
             )
             db.add(action_log)
             results.append({"risk_id": risk_id, "ok": True})
 
+        self._recount_risks(db, review_id)
         db.commit()
         return {"action": action, "results": results}
+
+    def _recount_risks(self, db: Session, review_id: str) -> None:
+        """重算 high/medium/low 三级计数并回写 review 行（跳过 rejected 风险）。"""
+        from sqlalchemy import func
+
+        counts = (
+            db.query(
+                ComplianceRisk.risk_level,
+                func.count(ComplianceRisk.id),
+            )
+            .filter(
+                ComplianceRisk.review_id == review_id,
+                ComplianceRisk.human_decision != "rejected",
+            )
+            .group_by(ComplianceRisk.risk_level)
+            .all()
+        )
+        level_map = {row[0]: row[1] for row in counts}
+        review = db.query(ComplianceReview).filter(ComplianceReview.id == review_id).first()
+        if review:
+            review.high_risk_count = level_map.get("high", 0)
+            review.medium_risk_count = level_map.get("medium", 0)
+            review.low_risk_count = level_map.get("low", 0)

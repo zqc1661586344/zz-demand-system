@@ -102,7 +102,17 @@ class Settings(BaseSettings):
     upload_dir: str = "./data/uploads"
     max_upload_size_mb: int = 50
     # 允许上传的文件扩展名（逗号分隔，与 pipeline.py 支持的格式保持一致）
-    allowed_extensions: list[str] = [".pdf", ".txt", ".md", ".docx", ".csv", ".html", ".xlsx", ".pptx", ".toml"]
+    allowed_extensions: list[str] = [
+        ".pdf",
+        ".txt",
+        ".md",
+        ".docx",
+        ".csv",
+        ".html",
+        ".xlsx",
+        ".pptx",
+        ".toml",
+    ]
 
     # 多进程部署配置
     web_concurrency: int = 4
@@ -139,8 +149,10 @@ class Settings(BaseSettings):
     compliance_llm_temperature: float = 0.1
     # 法规向量库独立 collection（与业务文档 documents 隔离）
     compliance_vector_collection: str = "compliance_regulations"
-    # 自反思最大重试次数
-    compliance_max_retry: int = 2
+    # 自反思最大重试次数（图内 reflect → review 回炉）
+    compliance_reflect_max_retry: int = 3
+    # Celery 任务级重试（网络/LLM 瞬时错误时重投队列，独立于图内重试）
+    compliance_task_max_retries: int = 2
     # 自反思质量阈值
     compliance_quality_threshold: float = 0.7
     # 法规检索 Top-K

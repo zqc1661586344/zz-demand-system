@@ -4,16 +4,14 @@
     parse → supervise → extract → review ─┬─(template_id 有)→ compare → reflect
                                           └─(无)───────────→ reflect
     reflect ──(质量<阈值 且重试未超限)──→ review（自反思回炉）
-           ├─(HITL 启用且有高风险)──→ human_review → generate_report
-           └─(否则)────────────→ generate_report
-    generate_report → END
+           ├─(HITL 启用且有高风险)──→ human_review → END（等待 /resume 补 generate_report）
+           └─(否则)────────────→ generate_report → END
+
+human_review 是终态：进入后风险/条款已落库，图正常终止，前端需等人工审核后调用
+POST /reviews/{id}/resume 触发 generate_report 并生成正式报告。
 
 节点由 compliance.harness.ComplianceHarness 提供（runtime.py）；本模块只负责
 把节点、边、条件边组装成 graph。compile(checkpointer=...) 在 harness.__init__ 完成。
-
-依赖注记：review_graph 顶层 import ComplianceHarness 不会触发循环依赖——
-runtime.py 只在 ComplianceHarness.__init__ 方法内【延迟】导入 build_review_graph，
-因此「review_graph → runtime（顶层无 review_graph 导入）→ 安全」。
 """
 
 from langgraph.graph import END, StateGraph

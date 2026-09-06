@@ -73,23 +73,34 @@ class ReviewState(TypedDict, total=False):
     review_plan: list  # list[str]
 
     # ---- 审查结果 ----
-    risks: list  # list[dict]：{clause_number, risk_level, risk_category,
-    #             description, suggestion, legal_references, ...}
+    risks: list  # list[dict]：{id, clause_id, playbook_rule_id, clause_number,
+    #             risk_level, risk_category, description, suggestion,
+    #             legal_references, ai_confidence, ...}
     review_summary: str
+    risk_counts: dict  # {"high": n, "medium": n, "low": n, "total": n}
 
-    # ---- 模板比对（预留）----
-    template_diff: Optional[list]
+    # ---- 模板比对 ----
+    template_deviations: Optional[list]  # compare_template 实际写入
+    template_diff: Optional[list]  # 预留
 
     # ---- 自反思 ----
     retry_count: int
     quality_score: float
+    coverage_score: float  # reflect 实际写入
+    avg_confidence: float  # reflect 实际写入
+    regulation_hits: dict  # review_clauses 实际写入：{clause_number: [hit, ...]}
+    degraded_reasons: list[str]  # reflect 判定规则不足时写入
 
-    # ---- 人机协同（MVP 预留 interrupt）----
-    pending_human_review: list  # list[str] 高风险条款号（HITL 启用时暂停点）
-    human_decisions: Optional[dict]
+    # ---- 人机协同 ----
+    pending_human_review: list  # list[str] 高风险条款号
+    human_decisions: Optional[list]  # 实际是 list[dict]，承载人工决策明细
+    human_decision_count: int
+    human_rejected_count: int
+    human_modified_count: int
 
     # ---- 输出 ----
     report_id: Optional[str]
     report_path: Optional[str]
+    report_paths: Optional[dict]  # generate_report 实际写入：{"html": ..., "word": ...}
     status: str
     error: Optional[str]

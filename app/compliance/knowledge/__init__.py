@@ -27,7 +27,6 @@ from app.compliance.knowledge.retrieval import (
 )
 from app.compliance.knowledge.citation_verifier import (
     normalize_text,
-    text_similarity,
     verify_citation,
     verify_references,
 )
@@ -41,7 +40,6 @@ __all__ = [
     "search_regulations_lite",
     "count_regulations",
     "normalize_text",
-    "text_similarity",
     "verify_citation",
     "verify_references",
 ]

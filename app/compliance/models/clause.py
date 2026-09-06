@@ -18,6 +18,12 @@ class ComplianceClause(Base):
     __tablename__ = "compliance_clauses"
 
     id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    review_id = Column(
+        String(36),
+        ForeignKey("compliance_reviews.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     compliance_doc_id = Column(
         String(36),
         ForeignKey("compliance_documents.id", ondelete="CASCADE"),
