@@ -354,7 +354,7 @@ class ComplianceHarness:
         }
 
     def review_clauses(self, state: dict) -> dict:
-        """节点 review：Playbook 命中 → 风险识别（5 类 × 3 级）。"""
+        """节点 review：Playbook 命中 → 风险识别（5 类 × 3 级）→ 法规 RAG 引用校验。"""
         guarded = self._guard_failed(state)
         if guarded is not None:
             return guarded
@@ -362,6 +362,7 @@ class ComplianceHarness:
         clauses = state.get("clauses") or []
         rr = self._risk_skill.execute({"clauses": clauses, "rules": state.get("rules") or []})
         risks = (rr.get("data") or {}).get("risks") if rr.get("ok") else []
+        risks = self._enrich_references_with_rag(risks)
         counts = {
             "high_risk_count": sum(1 for r in risks if r.get("risk_level") == "high"),
             "medium_risk_count": sum(1 for r in risks if r.get("risk_level") == "medium"),
@@ -369,6 +370,28 @@ class ComplianceHarness:
         }
         self._persist_status(state["review_id"], STATUS_REVIEWING, **counts)
         return {**state, "risks": risks, "status": STATUS_REVIEWING}
+
+    def _enrich_references_with_rag(self, risks: list[dict]) -> list[dict]:
+        """对 risks 的 legal_references 做法规检索 + 引用校验（空库/异常降级不阻断）。"""
+        if not risks:
+            return risks
+        enriched_count = 0
+        for risk in risks:
+            refs = risk.get("legal_references") or []
+            query = (risk.get("description") or risk.get("clause_number") or "").strip()
+            if not refs or not query:
+                continue
+            rag_result = self._rag_skill.execute({"query": query, "references": refs})
+            if rag_result.get("ok"):
+                verified = (rag_result.get("data") or {}).get("references") or refs
+                risk["legal_references"] = verified
+                enriched_count += 1
+            else:
+                for ref in refs:
+                    ref.setdefault("verified", False)
+                    ref.setdefault("needs_human_check", True)
+        logger.info("rag enrichment: %d/%d risks verified", enriched_count, len(risks))
+        return risks
 
     def reflect(self, state: dict) -> dict:
         """多维度自反思：覆盖率 + 置信度 + 重审衰减。"""
@@ -380,9 +403,7 @@ class ComplianceHarness:
         risks = state.get("risks") or []
         clauses = state.get("clauses") or []
 
-        if clauses and not risks:
-            coverage_score = 0.4
-        elif not clauses:
+        if not clauses:
             coverage_score = 0.2
         else:
             coverage_score = 1.0
@@ -390,6 +411,8 @@ class ComplianceHarness:
         if risks:
             confs = [float(r.get("ai_confidence") or 1.0) for r in risks]
             avg_conf = sum(confs) / len(confs)
+        elif clauses:
+            avg_conf = 0.9
         else:
             avg_conf = 0.5
 
@@ -586,6 +609,48 @@ class ComplianceHarness:
         return "skip_human"
 
     # ===================== 对外执行入口 =====================
+
+    def resume_review(self, review_id: str) -> dict:
+        """人工确认后续跑 generate_report（HITL resume 入口）。
+
+        从 checkpointer 加载 human_review 节点后的 state，手动调 generate_report。
+        checkpointer 为 None（langgraph 未装）或 state 丢失（进程重启 + InMemorySaver）
+        时返回错误，提示用户重新发起审查。
+        """
+        config = _thread_config(review_id)
+        if self.checkpointer is None:
+            return {
+                "thread_id": config["configurable"]["thread_id"],
+                "status": "failed",
+                "error": "checkpointer unavailable — cannot resume, please re-initiate review",
+            }
+        try:
+            tuple_result = self.checkpointer.get_tuple(config)
+            if tuple_result is None:
+                return {
+                    "thread_id": config["configurable"]["thread_id"],
+                    "status": "failed",
+                    "error": "state not found in checkpointer — may have been lost after restart",
+                }
+            state = tuple_result.values
+            if not isinstance(state, dict):
+                state = dict(state) if state else {}
+            if state.get("review_id") != review_id:
+                state["review_id"] = review_id
+            result = self.generate_report(state)
+            return {
+                "thread_id": config["configurable"]["thread_id"],
+                "status": result.get("status", STATUS_FAILED),
+                "error": result.get("error"),
+            }
+        except Exception as e:  # noqa: BLE001
+            logger.exception("resume_review failed: %s", e)
+            self._persist_status(review_id, STATUS_FAILED, error_message=str(e))
+            return {
+                "thread_id": config["configurable"]["thread_id"],
+                "status": "failed",
+                "error": str(e),
+            }
 
     def start_review(
         self,

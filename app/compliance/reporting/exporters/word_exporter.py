@@ -57,15 +57,16 @@ def export_word(review_data: dict, out_dir: str | None = None) -> str:
     doc.add_paragraph()
 
     _add_meta_row(doc, "审查任务 ID", review_id)
-    _add_meta_row(doc, "合同类型", review_data.get("doc_type") or "—")
+    _add_meta_row(doc, "合同类型", review_data.get("doc_info", {}).get("doc_type") or "—")
     _add_meta_row(
         doc,
         "完成时间",
         (review_data.get("completed_at") or datetime.utcnow().isoformat())[:19],
     )
-    h = review_data.get("high_risk_count", 0)
-    m = review_data.get("medium_risk_count", 0)
-    l = review_data.get("low_risk_count", 0)
+    risk_counts = review_data.get("risk_counts") or {}
+    h = risk_counts.get("high", 0)
+    m = risk_counts.get("medium", 0)
+    l = risk_counts.get("low", 0)
     _add_meta_row(doc, "风险统计", f"🔴 {h}  🟡 {m}  🟢 {l}  合计 {h + m + l}")
 
     doc.add_page_break()

@@ -260,6 +260,8 @@ def generate_reports_for_review(
     html_path.write_text(html_content, encoding="utf-8")
     logger.info("report html generated: %s (%d bytes)", html_path, html_path.stat().st_size)
 
+    report_data.setdefault("review_id", review_id)
+    report_data.setdefault("completed_at", datetime.now(timezone.utc).isoformat())
     word_abs = export_word(report_data, str(report_dir)) or None
     pdf_abs = export_pdf(html_content, str(pdf_path))
 

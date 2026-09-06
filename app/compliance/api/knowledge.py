@@ -22,6 +22,7 @@ from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.compliance.knowledge import ingestion as knowledge_ingestion
 from app.compliance.knowledge import retrieval as knowledge_retrieval
+from app.compliance.knowledge.vector_store import delete_regulations_from_store
 from app.compliance.models.regulation import (
     ComplianceRegulation,
     ComplianceRegulationArticle,
@@ -174,6 +175,10 @@ def delete_regulation(
     ).delete()
     db.delete(r)
     db.commit()
+    try:
+        delete_regulations_from_store(regulation_id)
+    except Exception as e:  # noqa: BLE001 — 向量删除失败只记日志，不回滚DB
+        logger.warning("vector cleanup failed for regulation %s: %s", regulation_id, e)
     logger.info("Regulation deleted: %s", r.title)
     return {"ok": True, "deleted": regulation_id}
 

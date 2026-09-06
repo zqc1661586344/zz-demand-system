@@ -16,7 +16,6 @@ from app.models.user import User
 from app.schemas.common import PaginatedResponse
 from app.compliance.models.report import ComplianceReport
 from app.compliance.models.review import ComplianceReview
-from app.compliance.models.document import ComplianceDocument
 from app.compliance.schemas.review import (
     HumanReviewRequest,
     ReviewCreateRequest,
@@ -36,15 +35,6 @@ def _assert_review_access(db: Session, review_id: str, user: User) -> Compliance
     return review
 
 
-def _assert_document_access(db: Session, document_id: str, user: User) -> ComplianceDocument:
-    doc = db.query(ComplianceDocument).filter(ComplianceDocument.id == document_id).first()
-    if doc is None:
-        raise HTTPException(status_code=404, detail="document not found")
-    if not user.is_superuser and doc.uploaded_by != user.id:
-        raise HTTPException(status_code=403, detail="forbidden: not your document")
-    return doc
-
-
 @router.post("", response_model_exclude_none=True)
 @limiter.limit("10/minute")
 def create_review(
@@ -54,7 +44,6 @@ def create_review(
     current_user: User = Depends(get_current_user),
     request: Request = None,  # noqa: ARG001
 ):
-    _assert_document_access(db, req.document_id, current_user)
     service = ReviewService()
     original_filename = getattr(req, "original_filename", None) or f"doc-{req.document_id}"
     try:
@@ -69,8 +58,16 @@ def create_review(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
 
-    background_tasks.add_task(service.run_review, payload)
-    logger.info("review %s queued for doc %s", response.review_id, req.document_id)
+    if settings.use_celery_task:
+        from app.compliance.tasks import run_compliance_review
+
+        run_compliance_review.delay(payload)
+        logger.info("review %s queued via celery for doc %s", response.review_id, req.document_id)
+    else:
+        background_tasks.add_task(service.run_review, payload)
+        logger.info(
+            "review %s queued via background_tasks for doc %s", response.review_id, req.document_id
+        )
     return response
 
 
@@ -149,6 +146,39 @@ def human_review(
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     return result
+
+
+@router.post("/{review_id}/resume")
+@limiter.limit("10/minute")
+def resume_review(
+    review_id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+    request: Request = None,  # noqa: ARG001
+):
+    """人工确认后续跑 generate_report（HITL resume）。
+
+    仅当 review.status == pending_human 时可用。
+    """
+    review = _assert_review_access(db, review_id, current_user)
+    if review.status != "pending_human":
+        raise HTTPException(
+            status_code=400,
+            detail=f"review status is '{review.status}', expected 'pending_human' to resume",
+        )
+    from app.compliance.harness.runtime import get_harness
+
+    if settings.use_celery_task:
+        from app.compliance.tasks import resume_compliance_review
+
+        resume_compliance_review.delay(review_id)
+        logger.info("review %s resumed via celery by user %s", review_id, current_user.id)
+    else:
+        harness = get_harness()
+        background_tasks.add_task(harness.resume_review, review_id)
+        logger.info("review %s resumed via background_tasks by user %s", review_id, current_user.id)
+    return {"ok": True, "review_id": review_id, "status": "resuming"}
 
 
 _FORMAT_EXT = {"html": ".html", "word": ".docx", "pdf": ".pdf"}

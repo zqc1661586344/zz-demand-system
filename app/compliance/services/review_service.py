@@ -141,13 +141,11 @@ class ReviewService:
             .order_by(CompliancePlaybook.priority.asc())
             .all()
         )
-        # 兜底：该合同类型没规则时拉所有 active 规则（MVP 开发期友好）
         if not rows:
-            rows = db.query(CompliancePlaybook).filter(CompliancePlaybook.is_active.is_(True)).all()
-            if rows:
-                logger.info(
-                    "no rules for %s, fallback to all active (%d)", contract_type, len(rows)
-                )
+            logger.warning(
+                "no active Playbook rules for contract_type=%s — review will proceed in LLM-only mode",
+                contract_type,
+            )
 
         return [
             {

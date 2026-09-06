@@ -62,7 +62,8 @@ def build_review_graph(harness: ComplianceHarness) -> StateGraph:
         {"retry": "review", "human": "human_review", "skip_human": "generate_report"},
     )
 
-    g.add_edge("human_review", "generate_report")
+    # human_review 是终态：停在 pending_human，等待人工确认后通过 /resume 触发 generate_report
+    g.add_edge("human_review", END)
     g.add_edge("generate_report", END)
 
     return g

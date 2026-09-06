@@ -39,7 +39,7 @@ def _fetch_review_detail(review_id: str):
 def _start_review(document_id: str, doc_type: str | None = None):
     payload = {"document_id": document_id}
     if doc_type:
-        payload["doc_type"] = doc_type
+        payload["contract_type_override"] = doc_type
     try:
         return post("/api/compliance/reviews", json=payload)
     except ApiError as e:

@@ -21,14 +21,17 @@ if _proj_root not in sys.path:
 
 import streamlit as st
 
+from app.config import settings
 from app.logging_config import get_logger
 from app.streamlit_app.auth import logout, restore_session_from_local_storage
 from app.streamlit_app.views.chat import new_conversation, page as chat_page
-from app.streamlit_app.views.compliance import page as compliance_page
 from app.streamlit_app.views.documents import page as documents_page
-from app.streamlit_app.views.knowledge import page as knowledge_page
 from app.streamlit_app.views.login import page as login_page
-from app.streamlit_app.views.playbooks import page as playbooks_page
+
+if settings.compliance_enabled:
+    from app.streamlit_app.views.compliance import page as compliance_page
+    from app.streamlit_app.views.knowledge import page as knowledge_page
+    from app.streamlit_app.views.playbooks import page as playbooks_page
 
 logger = get_logger(__name__)
 
@@ -51,8 +54,14 @@ def main():
     # browser refresh (F5) keeps the user on the same page instead of resetting
     # to chat when a fresh Streamlit session is created.
     page = st.query_params.get("page", "chat")
-    page_options = ["💬 对话", "📁 文档管理", "⚖️ 合规审查", "📋 Playbook", "📚 法规库"]
-    page_keys = ["chat", "docs", "compliance", "playbooks", "knowledge"]
+    base_options = ["💬 对话", "📁 文档管理"]
+    base_keys = ["chat", "docs"]
+    if settings.compliance_enabled:
+        page_options = base_options + ["⚖️ 合规审查", "📋 Playbook", "📚 法规库"]
+        page_keys = base_keys + ["compliance", "playbooks", "knowledge"]
+    else:
+        page_options = base_options
+        page_keys = base_keys
 
     # Find the radio index matching the current page
     try:
@@ -93,11 +102,11 @@ def main():
     # Page routing
     if page == "docs":
         documents_page()
-    elif page == "compliance":
+    elif page == "compliance" and settings.compliance_enabled:
         compliance_page()
-    elif page == "playbooks":
+    elif page == "playbooks" and settings.compliance_enabled:
         playbooks_page()
-    elif page == "knowledge":
+    elif page == "knowledge" and settings.compliance_enabled:
         knowledge_page()
     else:
         chat_page()
