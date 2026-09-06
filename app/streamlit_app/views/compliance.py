@@ -61,7 +61,7 @@ _REPORT_FORMATS = [
 ]
 
 
-def _render_report_downloads(review_id: str):
+def _render_report_downloads(review_id: str, scope: str = "main"):
     """渲染审查报告下载按钮组（P1）。"""
     st.markdown("### 📥 下载报告")
     st.caption("生成失败的格式会被跳过（如环境未装 weasyprint 则 PDF 无数据）。")
@@ -71,7 +71,12 @@ def _render_report_downloads(review_id: str):
             try:
                 data = download_bytes(f"/api/compliance/reviews/{review_id}/report/{fmt}")
             except ApiError as e:
-                st.button(f"⬇ {label}", disabled=True, help=str(e.detail))
+                st.button(
+                    f"⬇ {label}",
+                    disabled=True,
+                    help=str(e.detail),
+                    key=f"dl_disabled_{fmt}_{review_id[:8]}_{scope}",
+                )
                 continue
             ts = datetime.now().strftime("%Y%m%d")
             st.download_button(
@@ -80,7 +85,7 @@ def _render_report_downloads(review_id: str):
                 file_name=f"compliance-review-{review_id[:8]}-{ts}.{fmt}",
                 mime=mime,
                 use_container_width=True,
-                key=f"dl_{fmt}_{review_id[:8]}",
+                key=f"dl_{fmt}_{review_id[:8]}_{scope}",
             )
 
 
@@ -137,7 +142,7 @@ def page():
         pending_id = st.session_state.get("pending_review_id")
         if pending_id:
             st.markdown("---")
-            _render_review_result(pending_id, auto_refresh=True)
+            _render_review_result(pending_id, auto_refresh=True, scope="tab_new")
 
     # ==============================================================
     # Tab 2: 历史记录
@@ -195,10 +200,12 @@ def page():
         # 展示选中的审查详情
         if st.session_state.get("pending_review_id"):
             st.markdown("---")
-            _render_review_result(st.session_state["pending_review_id"], auto_refresh=False)
+            _render_review_result(
+                st.session_state["pending_review_id"], auto_refresh=False, scope="tab_list"
+            )
 
 
-def _render_review_result(review_id: str, auto_refresh: bool = False):
+def _render_review_result(review_id: str, auto_refresh: bool = False, scope: str = "main"):
     """渲染单个审查的完整结果：状态 → 汇总 → 风险列表 → 报告。"""
 
     detail = _fetch_review_detail(review_id)
@@ -252,11 +259,11 @@ def _render_review_result(review_id: str, auto_refresh: bool = False):
 
     if total == 0:
         st.success("🎉 未检出风险条款，合同合规！")
-        _render_report_downloads(review_id)
+        _render_report_downloads(review_id, scope=scope)
         return
     # ---- 风险明细 ----
     st.markdown("---")
-    _render_report_downloads(review_id)
+    _render_report_downloads(review_id, scope=scope)
     st.markdown("---")
     st.markdown("### 风险明细")
 

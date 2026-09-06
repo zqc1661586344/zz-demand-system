@@ -7,6 +7,7 @@ dist/
 build/
 
 # Runtime data
+data/
 data/chroma/
 data/uploads/
 data/logs/
