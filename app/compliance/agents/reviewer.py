@@ -17,7 +17,7 @@ from typing import Optional
 from app.compliance.agents.base import AgentBase, get_structured_llm
 from app.compliance.agents.prompts.reviewer_prompt import build_clause_review_prompt
 from app.compliance.playbook.engine import match_rules_for_clauses
-from app.compliance.schemas.review import RiskItem
+from app.compliance.schemas.review import RiskItem, RiskItemList
 
 # Playbook 命中 → 风险维度的启发映射（按规则名关键词）
 _CATEGORY_KEYWORDS: list[tuple[str, str]] = [
@@ -49,14 +49,22 @@ def _hit_to_risk(hit: dict) -> dict:
     category = _category_for_hit(hit)
     return {
         "clause_number": hit.get("clause_number", ""),
+        "clause_id": hit.get("clause_id"),
+        "playbook_rule_id": hit.get("rule_id") or hit.get("playbook_rule_id"),
         "risk_level": hit.get("risk_level", "medium"),
         "risk_category": category,
         "description": _build_description(hit, category),
         "suggestion": hit.get("suggested_clause"),
         "suggestion_reason": hit.get("standard_position"),
         "legal_references": (
-            [{"ref_type": "playbook", "ref_name": hit.get("legal_basis_ref") or "",
-              "ref_article": None, "ref_content": hit.get("standard_position") or ""}]
+            [
+                {
+                    "ref_type": "playbook",
+                    "ref_name": hit.get("legal_basis_ref") or "",
+                    "ref_article": None,
+                    "ref_content": hit.get("standard_position") or "",
+                }
+            ]
             if hit.get("legal_basis_ref")
             else []
         ),
@@ -68,10 +76,7 @@ def _build_description(hit: dict, category: str) -> str:
     """组装风险描述（含条款号与规则理由，前端可直接展示）。"""
     base = hit.get("name") or "条款风险"
     reason = hit.get("standard_position") or ""
-    return (
-        f"条款 {hit.get('clause_number') or ''}：{base}"
-        f"（{category}）。规则说明：{reason}"
-    )
+    return f"条款 {hit.get('clause_number') or ''}：{base}（{category}）。规则说明：{reason}"
 
 
 class ReviewerAgent(AgentBase):
@@ -103,8 +108,8 @@ class ReviewerAgent(AgentBase):
                 risks.append(RiskItem(**raw))
             return risks
 
-        # 非 test：结构化 LLM 输出 + 融合 Playbook 命中线索
-        structured = get_structured_llm(RiskItem)
+        # 非 test：结构化 LLM 输出（列表容器） + 融合 Playbook 命中线索
+        structured = get_structured_llm(RiskItemList)
         if structured is None:
             # 结构化失败降级：仍用 Playbook 命中（确定性路径）
             raw_hits = match_rules_for_clauses([clause], rules or [], llm=None)
@@ -112,29 +117,43 @@ class ReviewerAgent(AgentBase):
 
         try:
             prompt = build_clause_review_prompt(
-                clause_number, text,
-                playbook_hints=rules, regulation_hits=regulation_hits,
+                clause_number,
+                text,
+                playbook_hints=rules,
+                regulation_hits=regulation_hits,
             )
-            items = structured.invoke(prompt)
-            # 兼容单条 RiskItem 或 list
-            if isinstance(items, RiskItem):
-                return [items]
-            return list(items)
+            result = structured.invoke(prompt)
+            if isinstance(result, RiskItemList):
+                return result.risks
+            if isinstance(result, list):
+                return [r for r in result if isinstance(r, RiskItem)]
+            if isinstance(result, RiskItem):
+                return [result]
+            return []
         except Exception as e:  # noqa: BLE001
             self.log(f"LLM review failed for clause {clause_number}: {e}")
-            return []
+            raise
 
     def review_all(
         self,
         clauses: list[dict],
         rules: Optional[list[dict]] = None,
         regulation_hits: Optional[dict] = None,
-    ) -> list[RiskItem]:
-        """逐条审查全部条款，汇总所有风险。regulation_hits: {clause_number: hits}。"""
+    ) -> tuple[list[RiskItem], int]:
+        """逐条审查全部条款，汇总所有风险。
+
+        Returns:
+            (risks, failed_count) — failed_count 是 LLM 调用异常的条款数。
+        """
         all_risks: list[RiskItem] = []
+        failed = 0
         for clause in clauses:
             hits = (regulation_hits or {}).get(clause.get("clause_number"))
-            risks = self.review_clause(clause, rules, hits)
-            all_risks.extend(risks)
-        self.log(f"review_all: {len(clauses)} clauses -> {len(all_risks)} risks")
-        return all_risks
+            try:
+                risks = self.review_clause(clause, rules, hits)
+                all_risks.extend(risks)
+            except Exception as e:  # noqa: BLE001
+                failed += 1
+                self.log(f"LLM review FAILED clause {clause.get('clause_number')}: {e}")
+        self.log(f"review_all: {len(clauses)} clauses -> {len(all_risks)} risks, {failed} failed")
+        return all_risks, failed

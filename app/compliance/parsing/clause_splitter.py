@@ -11,6 +11,8 @@
 """
 
 import re
+import uuid
+
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -52,7 +54,14 @@ def split_clauses_from_text(
     markers = list(_CLAUSE_RE.finditer(raw))
     if not markers:
         logger.info("clause_splitter: no 第X条 markers found, treat whole text as one clause")
-        return [{"clause_number": "第一条", "title": None, "content": raw.strip()}]
+        return [
+            {
+                "clause_id": str(uuid.uuid4()),
+                "clause_number": "第一条",
+                "title": None,
+                "content": raw.strip(),
+            }
+        ]
 
     clauses: list[dict] = []
     for i, m in enumerate(markers):
@@ -73,7 +82,14 @@ def split_clauses_from_text(
             elif _looks_like_title(second_line):
                 body = "\n".join(lines[2:]).strip()
                 title = second_line
-        clauses.append({"clause_number": number, "title": title, "content": body})
+        clauses.append(
+            {
+                "clause_id": str(uuid.uuid4()),
+                "clause_number": number,
+                "title": title,
+                "content": body,
+            }
+        )
 
     logger.info("clause_splitter: split %d clauses from text", len(clauses))
     return clauses

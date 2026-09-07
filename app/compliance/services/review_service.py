@@ -235,17 +235,12 @@ class ReviewService:
 
         clause_rows = (
             db.query(ComplianceClause)
-            .filter(ComplianceClause.compliance_doc_id == review.compliance_doc_id)
+            .filter(ComplianceClause.review_id == review_id)
             .order_by(ComplianceClause.sort_order.asc())
             .all()
         )
         clause_map: dict[str, ComplianceClause] = {c.id: c for c in clause_rows}
-
-        ki_rows = (
-            db.query(ComplianceKeyInfo)
-            .filter(ComplianceKeyInfo.compliance_doc_id == review.compliance_doc_id)
-            .all()
-        )
+        ki_rows = db.query(ComplianceKeyInfo).filter(ComplianceKeyInfo.review_id == review_id).all()
         key_info: dict[str, str] = {ki.field_key: ki.field_value or "" for ki in ki_rows}
 
         risks = (

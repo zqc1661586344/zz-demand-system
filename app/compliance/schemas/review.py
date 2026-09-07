@@ -93,6 +93,10 @@ class RiskItem(BaseModel):
     ai_confidence: float = 1.0
 
 
+class RiskItemList(BaseModel):
+    risks: list[RiskItem] = Field(default_factory=list, description="该条款检出的风险列表")
+
+
 class ReviewResult(BaseModel):
     doc_type: DocType
     key_info: KeyInfo

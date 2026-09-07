@@ -107,11 +107,17 @@ def list_reviews(
     request: Request = None,  # noqa: ARG001
 ):
     q = db.query(ComplianceReview)
-    if not current_user.is_superuser:
+    admin_view_all = current_user.is_superuser
+    if not admin_view_all:
         q = q.filter(ComplianceReview.created_by == current_user.id)
     total = q.count()
     service = ReviewService()
-    items = service.list_reviews(db=db, user_id=current_user.id, limit=limit, offset=offset)
+    items = service.list_reviews(
+        db=db,
+        user_id=None if admin_view_all else current_user.id,
+        limit=limit,
+        offset=offset,
+    )
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 

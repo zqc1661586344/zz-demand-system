@@ -30,10 +30,13 @@ class RiskSkill(SkillBase):
 
         try:
             agent = ReviewerAgent(llm=get_llm_for_compliance())
-            items = agent.review_all(clauses, rules, regulation_hits)
+            items, failed_count = agent.review_all(clauses, rules, regulation_hits)
             risks = [i.model_dump() if hasattr(i, "model_dump") else dict(i) for i in items]
-            self.log(f"{len(clauses)} clauses -> {len(risks)} risks")
-            return {"ok": True, "data": {"risks": risks}}
+            self.log(f"{len(clauses)} clauses -> {len(risks)} risks, {failed_count} llm failures")
+            return {
+                "ok": True,
+                "data": {"risks": risks, "llm_error_count": failed_count},
+            }
         except Exception as e:  # noqa: BLE001 — 审查异常统一降级返回
             self.log(f"risk skill failed: {e}")
             return self.err(f"risk skill 失败：{e}")

@@ -25,7 +25,6 @@ from app.compliance.agents.extractor import ExtractorAgent
 from app.compliance.agents.reporter import ReporterAgent
 from app.compliance.agents.supervisor import SupervisorAgent
 from app.compliance.harness.checkpointer import build_checkpointer
-from app.compliance.harness.hitl import HitlManager
 from app.compliance.models.clause import ComplianceClause, ComplianceKeyInfo
 from app.compliance.models.playbook import CompliancePlaybook
 from app.compliance.models.report import ComplianceReport
@@ -35,7 +34,6 @@ from app.compliance.models.review import (
     ComplianceReview,
 )
 from app.compliance.skills.parse_skill import ParseSkill
-from app.compliance.skills.playbook_skill import PlaybookSkill
 from app.compliance.skills.rag_skill import RagSkill
 from app.compliance.skills.report_skill import ReportSkill
 from app.compliance.skills.risk_skill import RiskSkill
@@ -68,12 +66,12 @@ def compute_reflect_quality(
     retry_count: int = 0,
     avg_conf_override: float | None = None,
     rules: list | None = None,
+    llm_error_count: int = 0,
 ) -> tuple[float, float, float, list[str]]:
     """纯函数：计算 reflect 阶段的 quality 评分 + degraded 原因。
 
-    关键修正：零 Playbook 规则场景 → coverage 打折、quality 上限封顶。
-    之前的公式会给"零规则 + 零风险合同"打 0.95 分（coverage=1.0 * 0.5 + avg_conf=0.9 * 0.5），
-    这在"没有任何规则可比对"的场景下是危险的自信 —— 等于"什么都没检查却说合规"。
+    关键修正：零 Playbook 规则场景 → coverage 打折、quality 上限封顶；
+    LLM 逐条款失败计数 → 失败率 ≥30% 时大幅降 quality + degraded_reasons。
 
     返回 (quality, coverage_score, avg_confidence, degraded_reasons)。
     """
@@ -86,6 +84,17 @@ def compute_reflect_quality(
         degraded.append("no_clauses_extracted")
     else:
         coverage_score = 1.0
+
+    # LLM 失败率降 coverage（>=30% 时严重惩罚）
+    if clauses and llm_error_count > 0:
+        fail_ratio = llm_error_count / len(clauses)
+        degraded.append(f"llm_failed_{llm_error_count}/{len(clauses)}")
+        if fail_ratio >= 0.5:
+            coverage_score *= 0.3
+        elif fail_ratio >= 0.3:
+            coverage_score *= 0.6
+        elif fail_ratio >= 0.1:
+            coverage_score *= 0.85
 
     if not has_rules:
         coverage_score *= 0.5
@@ -143,10 +152,8 @@ class ComplianceHarness:
         self.supervisor = SupervisorAgent()
         self.extractor = ExtractorAgent()
         self.reporter = ReporterAgent()
-        self.hitl = HitlManager()
         # 能力层（skills）
         self._parse_skill = ParseSkill()
-        self._playbook_skill = PlaybookSkill()
         self._rag_skill = RagSkill()
         self._risk_skill = RiskSkill()
         self._report_skill = ReportSkill()
@@ -248,15 +255,16 @@ class ComplianceHarness:
             for old_id in existing_clause_ids:
                 db.query(ComplianceClause).filter(ComplianceClause.id == old_id).delete()
 
-            db.query(ComplianceKeyInfo).filter(
-                ComplianceKeyInfo.compliance_doc_id == compliance_doc_id
-            ).delete(synchronize_session=False)
+            db.query(ComplianceKeyInfo).filter(ComplianceKeyInfo.review_id == review_id).delete(
+                synchronize_session=False
+            )
             for k, v in (key_info or {}).items():
                 if v is None or v == "":
                     continue
                 db.add(
                     ComplianceKeyInfo(
                         id=str(_uuid.uuid4()),
+                        review_id=review_id,
                         compliance_doc_id=compliance_doc_id,
                         field_key=k,
                         field_value=str(v),
@@ -291,13 +299,13 @@ class ComplianceHarness:
                         _rule_id_cache[cache_key] = _pb_row[0] if _pb_row else None
                     playbook_id = _rule_id_cache[cache_key]
 
-                clause_idx = r.get("clause_index")
-                clause_id = (
-                    clause_id_by_index.get(int(clause_idx)) if clause_idx is not None else None
-                )
+                clause_id = r.get("clause_id")
+                if not clause_id:
+                    clause_number = r.get("clause_number") or ""
+                    clause_id = clause_id_by_number.get(clause_number)
 
                 risk_obj = ComplianceRisk(
-                    id=str(_uuid.uuid4()),
+                    id=r.get("id") or str(_uuid.uuid4()),
                     review_id=review_id,
                     clause_id=clause_id,
                     risk_level=r.get("risk_level", "low"),
@@ -448,7 +456,9 @@ class ComplianceHarness:
         rules = state.get("rules") or []
 
         rr = self._risk_skill.execute({"clauses": clauses, "rules": rules})
-        raw_risks = (rr.get("data") or {}).get("risks") if rr.get("ok") else []
+        risk_data = rr.get("data") or {}
+        raw_risks = risk_data.get("risks") if rr.get("ok") else []
+        llm_error_count = int(risk_data.get("llm_error_count") or 0)
 
         clauses_by_number = {(c.get("clause_number") or ""): c.get("clause_id") for c in clauses}
         rules_by_category = {
@@ -486,7 +496,12 @@ class ComplianceHarness:
             sum(1 for r in risks if r.get("clause_id")),
             sum(1 for r in risks if r.get("playbook_rule_id")),
         )
-        return {**state, "risks": risks, "status": STATUS_REVIEWING}
+        return {
+            **state,
+            "risks": risks,
+            "llm_error_count": llm_error_count,
+            "status": STATUS_REVIEWING,
+        }
 
     def _enrich_references_with_rag(self, risks: list[dict]) -> list[dict]:
         """对 risks 的 legal_references 做法规检索 + 引用校验（空库/异常降级不阻断）。
@@ -577,7 +592,11 @@ class ComplianceHarness:
         rules = state.get("rules") or []
 
         quality, coverage_score, avg_conf, degraded = compute_reflect_quality(
-            clauses, risks, retry_count=retry_count, rules=rules
+            clauses,
+            risks,
+            retry_count=retry_count,
+            rules=rules,
+            llm_error_count=int(state.get("llm_error_count") or 0),
         )
         next_retry = retry_count + 1
 
@@ -770,28 +789,47 @@ class ComplianceHarness:
     # ===================== 条件边 =====================
 
     def should_compare(self, state: dict) -> str:
-        """有 template_id 或 rules 含 standard_position/suggested_clause → compare。"""
-        rules = state.get("rules") or []
-        if state.get("template_id") or any(
-            r.get("standard_position") or r.get("suggested_clause") for r in rules
-        ):
-            return "compare"
+        """企业模板比对 — 保守下线（template_id 未真正加载模板，规则关键词无法匹配条款号）。
+
+        后续模板比对应改为：1) 真正加载模板文档；2) 匹配 risk.description 或关联 clause.content，
+        而非在 clause_number 上做 in 子串匹配。当前恒 skip，template_id 仅作预留字段。
+        """
         return "skip"
 
     def should_retry(self, state: dict) -> str:
-        """质量不达标或置信度过低 → retry；HITL 且有 high → human；否则 → skip_human。"""
+        """质量不达标或置信度过低 → retry；HITL 且有 high → human；否则 → skip_human。
+
+        短路规则（空转保护）：
+          - 零 Playbook 规则 + 零风险 → 不 retry（每次结果都一样，空跑 4 轮没意义）
+          - LLM 全失败（所有条款都调挂了）→ 不 retry（retry 也必败）
+        """
         quality = float(state.get("quality_score") or 0.0)
         avg_conf = float(state.get("avg_confidence") or 0.5)
         retry = int(state.get("retry_count") or 0)
         max_retry = int(settings.compliance_reflect_max_retry)
-        low_conf = (
-            avg_conf < 0.6 and (state.get("clauses") or []) and not (state.get("risks") or [])
-        )
-        if (quality < settings.compliance_quality_threshold or low_conf) and retry <= max_retry:
+        clauses = state.get("clauses") or []
+        risks = state.get("risks") or []
+        rules = state.get("rules") or []
+        llm_errors = int(state.get("llm_error_count") or 0)
+
+        all_llm_failed = clauses and llm_errors >= len(clauses) and not risks
+
+        # 短路：空转场景直接跳过 retry
+        if not rules and not risks:
+            logger.info("should_retry: zero rules + zero risks → skip retry (空转保护)")
+        elif all_llm_failed:
+            logger.info(
+                "should_retry: LLM ALL failed (%d/%d) → skip retry (必败)",
+                llm_errors,
+                len(clauses),
+            )
+        elif (
+            quality < settings.compliance_quality_threshold
+            or (avg_conf < 0.6 and clauses and not risks)
+        ) and retry <= max_retry:
             return "retry"
-        if settings.compliance_hitl_enabled and any(
-            r.get("risk_level") == "high" for r in (state.get("risks") or [])
-        ):
+
+        if settings.compliance_hitl_enabled and any(r.get("risk_level") == "high" for r in risks):
             return "human"
         return "skip_human"
 
@@ -819,7 +857,11 @@ class ComplianceHarness:
                     "status": "failed",
                     "error": "state not found in checkpointer — may have been lost after restart",
                 }
-            state = tuple_result.values
+            checkpoint = tuple_result.checkpoint
+            channel_values = (
+                checkpoint.get("channel_values") if isinstance(checkpoint, dict) else None
+            )
+            state = channel_values or {}
             if not isinstance(state, dict):
                 state = dict(state) if state else {}
             if state.get("review_id") != review_id:
@@ -833,8 +875,11 @@ class ComplianceHarness:
                 "status": result.get("status", STATUS_FAILED),
                 "error": result.get("error"),
             }
+        except (ConnectionError, TimeoutError, OSError) as e:
+            logger.warning("resume_review transient error (will be retried by Celery): %s", e)
+            raise
         except Exception as e:  # noqa: BLE001
-            logger.exception("resume_review failed: %s", e)
+            logger.exception("resume_review failed (permanent): %s", e)
             self._persist_status(review_id, STATUS_FAILED, error_message=str(e))
             return {
                 "thread_id": config["configurable"]["thread_id"],
@@ -980,7 +1025,7 @@ class ComplianceHarness:
             "rules": rules or [],
             "original_filename": original_filename or "",
             "template_id": template_id,
-            "contract_type": contract_type_override,
+            "contract_type_override": contract_type_override,
             "status": STATUS_PARSING,
             "retry_count": 0,
         }
@@ -1000,8 +1045,11 @@ class ComplianceHarness:
                 "status": status,
                 "error": (final or {}).get("error"),
             }
+        except (ConnectionError, TimeoutError, OSError) as e:
+            logger.warning("review run transient error (will be retried by Celery): %s", e)
+            raise
         except Exception as e:  # noqa: BLE001
-            logger.exception("review run failed: %s", e)
+            logger.exception("review run failed (permanent): %s", e)
             self._persist_status(review_id, STATUS_FAILED, error_message=str(e))
             return {
                 "thread_id": config["configurable"]["thread_id"],
