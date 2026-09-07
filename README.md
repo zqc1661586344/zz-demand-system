@@ -1,13 +1,13 @@
 # 企业 RAG 智能问答 & 文档合规审查系统
 
-> **版本**: 0.4.0
-> **最后更新**: 2026-09-02
-> **项目状态**: RAG 核心功能 + 合规审查全链路已上线
+> **版本**: 0.5.0
+> **最后更新**: 2026-09-07
+> **项目状态**: RAG 核心功能 + 合规审查全链路已上线（含 HITL 人工审核 + Resume）
 
 一套面向企业的 **双引擎** 智能知识系统：
 
 - 💬 **RAG 智能问答** — 上传内部文档，Hybrid RAG（稠密 PGVector + 稀疏 PG tsvector/BM25 + RRF 融合 + 可选重排）精准检索，SSE 流式回答
-- ⚖️ **文档合规审查** — LangGraph 多 Agent 协作（Supervisor → Extractor → Reviewer → Researcher → Reporter），自动识别合同/制度风险点、检索法规依据、生成 HTML/Word/PDF 三路报告
+- ⚖️ **文档合规审查** — LangGraph 工作流（parse → supervise → extract → review → reflect → generate_report），Playbook 确定性规则 + LLM 并发风险识别，自动检索法规依据并校验引用，HITL 人工审核确认高风险后 Resume 生成 HTML/Word/PDF 三路报告
 
 **前端** Streamlit（5 页面）| **后端** FastAPI（8001）| **数据** SQLite / PostgreSQL | **包管理** uv
 
@@ -91,13 +91,17 @@ flowchart TD
         RAG_ENGINE["RAG Engine<br/>Hybrid Retriever<br/>(PGVector + tsvector/BM25 + RRF)"]
     end
 
+    subgraph "异步调度层"
+        CELERY["Celery Task Queue<br/>(Redis broker)<br/>文档索引 + 合规审查"]
+    end
+
     subgraph "合规审查子系统 (app/compliance)"
         REVIEW["Reviews API<br/>(CRUD + 启动 + 报告下载)"]
         PB["Playbooks API / Service<br/>(规则库 CRUD)"]
         KB["Knowledge API / Service<br/>(法规 CRUD + 种子 + 检索)"]
         HARNESS["ReviewHarness<br/>(LangGraph 运行时)"]
-        SKILLS["Skills<br/>ParseSkill / PlaybookSkill / RiskSkill / RagSkill / ReportSkill"]
-        AGENTS["Agents<br/>Supervisor / Extractor / Reviewer / Researcher / Reporter"]
+        SKILLS["Skills<br/>ParseSkill / RiskSkill / RagSkill / ReportSkill"]
+        AGENTS["Agents<br/>Supervisor / Extractor / Reviewer"]
         REPORT["Reporting<br/>HTML + Word + PDF 三路生成"]
     end
 
@@ -106,6 +110,7 @@ flowchart TD
         VEC_DOC["PGVector: documents 集合<br/>(bge-m3 1024d)"]
         VEC_REG["PGVector: compliance_regulations 集合"]
         FILES["文件存储<br/>(原始文档 + 报告落盘)"]
+        CKP["LangGraph Checkpoint<br/>(PGVector PostgresSaver)"]
     end
 
     SL --> ROUTER
@@ -113,13 +118,18 @@ flowchart TD
     ROUTER --> JWT
     JWT --> AUTH & DOCS & CONV & REVIEW & PB & KB
 
+    DOCS --> CELERY
+    REVIEW --> CELERY
+    CELERY --> RAG_ENGINE
+    CELERY --> HARNESS
+
     CONV --> RAG_ENGINE
     RAG_ENGINE --> VEC_DOC
     RAG_ENGINE --> DB
 
-    REVIEW --> HARNESS
     HARNESS --> SKILLS & AGENTS
     HARNESS --> DB
+    HARNESS --> CKP
     HARNESS --> REPORT
     SKILLS --> KB
     KB --> VEC_REG & DB
@@ -230,29 +240,41 @@ flowchart TD
 
 ### LangGraph 工作流
 
+实际 8 个节点（`review_graph.py` 定义）：
+
+- `parse` — ParseSkill 解析文档 + 条款切分
+- `supervise` — SupervisorAgent 制定审查计划
+- `extract` — ExtractorAgent 条款分类 + 关键信息抽取
+- `review` — RiskSkill 内部串行/并发执行：Playbook 规则命中 → LLM 风险识别 → 两者融合 → RAG 法规检索 + 引用校验
+- `compare` — 可选，有 template_id 时执行模板偏离检测
+- `reflect` — 质量自评（覆盖率 + 置信度 + 重试衰减），生成 review_hints 供 retry 纠正
+- `human_review` — 可选，有高风险 + HITL 开启时进入，风险落库后 **END**（等待人工审核后 `/resume`）
+- `generate_report` — 组装报告 + 三路落盘
+
 ```mermaid
 flowchart TD
-    A([START]) --> B[ParseSkill<br/>解析文档 + 条款切分]
-    B --> C[SupervisorAgent<br/>制定审查计划]
-    C --> D[ExtractorAgent<br/>条款分类 + 关键信息抽取]
-    D --> E[PlaybookSkill<br/>关键词/规则匹配]
-    E --> F[RiskSkill<br/>风险识别 + 三级评级]
-    F --> G[RagSkill<br/>法规条文检索 + 引用校验]
-    G --> H[ReviewerAgent<br/>条款级审查意见]
-    H --> I[质量自评 reflect<br/>覆盖率 + 置信度 + 重试衰减]
-    I --> J{should_retry?}
-    J -->|质量不足 + 未超上限| E
-    J -->|有高风险 + HITL 开启| K[HitlManager<br/>人工审核]
-    J -->|模板比对启用| L[compare_template<br/>模板偏离检测]
-    J -->|否则| M[ReporterAgent + generator.py<br/>组装报告 + 三路落盘]
-    K --> M
-    L --> M
-    M --> N([END])
+    A([START]) --> B[parse<br/>ParseSkill 解析文档 + 条款切分]
+    B --> C[supervise<br/>SupervisorAgent 制定审查计划]
+    C --> D[extract<br/>ExtractorAgent 条款分类 + 关键信息抽取]
+    D --> E[review<br/>RiskSkill 并发审查]
+    E --> E_sub("  ├ Playbook 规则命中 (match_rules_for_clauses)<br/>  ├ LLM 风险识别 (ReviewerAgent.review_all 并发)<br/>  ├ 融合 (Playbook hits ∪ LLM results)<br/>  └ RAG 法规检索 + 引用校验")
+    E --> F{"should_compare?<br/>有 template_id?"}
+    F -->|是| G[compare<br/>模板偏离检测]
+    G --> H[reflect<br/>质量自评 + 生成 review_hints]
+    F -->|否| H
+    H --> I{should_retry?}
+    I -->|质量不足 + 未超上限| E
+    I -->|有高风险 + HITL 开启| J[human_review<br/>人工审核确认]
+    I -->|skip_human| K[generate_report<br/>三路报告落盘]
+    J --> J2([END<br/>等待 /resume])
+    K --> K2([END])
+
     style A fill:#6ee7b7
-    style N fill:#fca5a5
-    style J fill:#fde68a
+    style J2 fill:#fbbf24
+    style K2 fill:#fca5a5
+    style I fill:#fde68a
     style E fill:#c4b5fd
-    style M fill:#93c5fd
+    style K fill:#93c5fd
 ```
 
 ### 状态流转
@@ -260,20 +282,22 @@ flowchart TD
 ```mermaid
 stateDiagram-v2
     [*] --> pending: POST /reviews
-    pending --> parsing: ParseSkill
-    parsing --> planning: Supervisor + Extractor
-    planning --> reviewing: PlaybookSkill + RiskSkill
-    reviewing --> reflecting: 质量自评
-    reflecting --> reviewing: should_retry → 重试
-    reflecting --> pending_human: should_retry → HITL
-    reflecting --> comparing: compare_template
-    pending_human --> generating: HITL 通过
-    comparing --> generating: 比对完成
+    pending --> parsing: parse 节点
+    parsing --> planning: supervise + extract
+    planning --> reviewing: review 节点
+    reviewing --> reflecting: reflect 质量自评
+    reflecting --> reviewing: should_retry=retry → 纠正后重试
+    reflecting --> pending_human: should_retry=human → 有高风险+HITL
+    reflecting --> comparing: 有 template_id
+    reflecting --> generating: should_retry=skip_human → 无高风险
+    comparing --> reflecting: 比对完成
+    pending_human --> generating: /resume → 人工审核后恢复
     generating --> completed: HTML/Word/PDF 落盘
     parsing --> failed
     planning --> failed
     reviewing --> failed
     generating --> failed
+    pending_human --> failed: 卡死回收（启动时 >30min）
     failed --> [*]
     completed --> [*]
 ```
@@ -286,7 +310,7 @@ stateDiagram-v2
 | **法规知识库** | 审查的法规依据来源（PGVector 独立 collection `compliance_regulations`） | 📚 法规库页面（种子初始化 + 录入 + 语义检索） |
 | **风险等级** | high（高）/ medium（中）/ low（低） | 审查结果页直观展示 |
 | **报告格式** | HTML（自包含 + 内嵌样式）/ Word（python-docx 生成封面+目录）/ PDF（weasyprint） | 审查完成后一键三路下载 |
-| **HITL** | 高风险条款留痕，人工可确认/修改（MVP 默认不阻塞自动流程） | 审查结果页「人工审核」按钮 |
+| **HITL** | 有高风险时阻塞进入 `pending_human`，人工可逐条确认/误报/调级，批量操作后调 `/resume` 恢复生成报告 | Streamlit 合规审查页「人工审核」面板 |
 
 ### 审查报告示例产出
 
@@ -372,11 +396,22 @@ curl http://localhost:8001/api/compliance/reviews/<review-id> \
   -H "Authorization: Bearer <token>"
 # → 返回 {status, risks: [{clause_number, risk_level, description, suggestion, legal_references}], ...}
 
-# 人工审核（HITL）
-curl -X POST http://localhost:8001/api/compliance/reviews/<review-id>/human \
+# 人工审核（HITL）—— 逐条处理高风险条款
+curl -X POST http://localhost:8001/api/compliance/reviews/<review-id>/human-review \
   -H "Authorization: Bearer <token>" \
   -H "Content-Type: application/json" \
-  -d '{"risk_id": "<高风险条款 id>", "action": "confirm", "note": "法务已确认"}'
+  -d '{
+    "actions": [
+      {"risk_id": "<风险条款 id>", "action": "confirm", "note": "法务已确认"},
+      {"risk_id": "<风险条款 id>", "action": "dismiss", "note": "误报，实际合同无此问题"},
+      {"risk_id": "<风险条款 id>", "action": "downgrade", "note": "实际仅 medium"}
+    ]
+  }'
+
+# Resume —— 人工审核后恢复生成报告（review 必须处于 pending_human 状态）
+curl -X POST http://localhost:8001/api/compliance/reviews/<review-id>/resume \
+  -H "Authorization: Bearer <token>"
+# → 返回 {status: "pending", message: "Resume task queued"}，后台异步继续 LangGraph
 
 # 下载报告（三路格式）
 curl http://localhost:8001/api/compliance/reviews/<review-id>/report/html \
@@ -619,6 +654,7 @@ zz-demand-system/
 │   ├── rag/                        # RAG 核心（Hybrid Retriever / LLM / Embedding / Pipeline）
 │   ├── workflows/                  # 业务流程引擎
 │   ├── cache/                      # 缓存层
+│   ├── celery_app.py               # Celery 应用（文档索引 + 合规审查异步任务）
 │   ├── streamlit_app/              # Streamlit 前端
 │   │   ├── app.py                  #   入口 + 页面路由
 │   │   ├── api_client.py           #   后端 HTTP 客户端（含 token 管理）
@@ -626,7 +662,7 @@ zz-demand-system/
 │   │   └── views/
 │   │       ├── chat.py              #     💬 对话
 │   │       ├── documents.py        #     📁 文档管理
-│   │       ├── compliance.py       #     ⚖️ 合规审查（三路报告下载）
+│   │       ├── compliance.py       #     ⚖️ 合规审查（含 HITL 人工审核面板）
 │   │       ├── playbooks.py        #     📋 Playbook 规则库
 │   │       ├── knowledge.py        #     📚 法规知识库
 │   │       └── login.py            #     登录页
@@ -635,14 +671,14 @@ zz-demand-system/
 │       ├── services/               #   ReviewService / PlaybookService / RegulationService
 │       ├── models/                  #   SQLAlchemy（review/playbook/regulation 等）
 │       ├── schemas/                 #   Pydantic 请求/响应
-│       ├── workflows/              #   LangGraph 图构建 + 状态定义
-│       ├── harness/                #   LangGraph 运行时 + Checkpointer + HITL
-│       ├── agents/                 #   Supervisor / Extractor / Reviewer / Researcher / Reporter
+│       ├── workflows/              #   LangGraph 图构建 + 状态定义（review_graph.py / state.py）
+│       ├── harness/                #   LangGraph 运行时（runtime.py + checkpointer.py）
+│       ├── agents/                 #   Supervisor / Extractor / Reviewer（仅 3 个）
 │       │   └── prompts/             #     Prompt 模板（extractor_prompt 等）
-│       ├── skills/                  #   ParseSkill / PlaybookSkill / RiskSkill / RagSkill / ReportSkill
+│       ├── skills/                  #   ParseSkill / RiskSkill / RagSkill / ReportSkill
 │       ├── knowledge/               #   法规向量库 / 检索 / 种子数据 / 引用校验
 │       ├── parsing/                 #   文档解析 + 条款切分
-│       ├── playbook/                #   Playbook 规则引擎
+│       ├── playbook/                #   Playbook 规则引擎（match_rules_for_clauses）
 │       ├── reporting/               #   报告生成
 │       │   └── exporters/          #     Word (python-docx) / PDF (weasyprint)
 │       └── scripts/                 #   种子脚本
@@ -669,7 +705,7 @@ zz-demand-system/
 | **前端** | Streamlit 1.40+ | 纯 Python UI，5 页面 |
 | **ORM** | SQLAlchemy 2.0+ | |
 | **迁移** | Alembic | |
-| **认证** | JWT（python-jose）+ bcrypt | RBAC 三级角色 |
+| **认证** | JWT（python-jose）+ bcrypt | RBAC 四级角色：admin / legal / user / guest |
 | **向量库** | PGVector（bge-m3 1024d） | 两个独立 collection：`documents` 和 `compliance_regulations` |
 | **混合检索** | PG tsvector（默认）/ rank_bm25（回退）+ jieba | RRF 融合 |
 | **可选重排** | bge-reranker-v2-m3 | 需 transformers + torch |
