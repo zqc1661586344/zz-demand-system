@@ -25,12 +25,13 @@ class RiskSkill(SkillBase):
         clauses = ctx.get("clauses") or []
         rules = ctx.get("rules") or []
         regulation_hits = ctx.get("regulation_hits") or {}
+        hints = ctx.get("hints") or {}
         if not clauses:
             return self.err("risk skill: 缺 clauses")
 
         try:
             agent = ReviewerAgent(llm=get_llm_for_compliance())
-            items, failed_count = agent.review_all(clauses, rules, regulation_hits)
+            items, failed_count = agent.review_all(clauses, rules, regulation_hits, hints=hints)
             risks = [i.model_dump() if hasattr(i, "model_dump") else dict(i) for i in items]
             self.log(f"{len(clauses)} clauses -> {len(risks)} risks, {failed_count} llm failures")
             return {

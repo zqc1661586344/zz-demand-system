@@ -36,6 +36,24 @@ def _fetch_review_detail(review_id: str):
         return None
 
 
+def _human_review_action(review_id: str, risk_ids: list[str], action: str, **extra):
+    payload = {"action": action, "risk_ids": risk_ids}
+    payload.update(extra)
+    try:
+        return post(f"/api/compliance/reviews/{review_id}/human-review", json=payload)
+    except ApiError as e:
+        st.error(f"人工审核操作失败：{e.detail}")
+        return None
+
+
+def _resume_review(review_id: str):
+    try:
+        return post(f"/api/compliance/reviews/{review_id}/resume", json={})
+    except ApiError as e:
+        st.error(f"Resume 失败：{e.detail}")
+        return None
+
+
 def _start_review(document_id: str, doc_type: str | None = None):
     payload = {"document_id": document_id}
     if doc_type:
@@ -206,16 +224,16 @@ def page():
 
 
 def _render_review_result(review_id: str, auto_refresh: bool = False, scope: str = "main"):
-    """渲染单个审查的完整结果：状态 → 汇总 → 风险列表 → 报告。"""
+    """渲染单个审查的完整结果：状态 → 汇总 → 风险列表 → 人工审核 → 报告。"""
 
     detail = _fetch_review_detail(review_id)
     if detail is None:
         return
 
     status = detail.get("status", "")
-    st.markdown(f"### 审查结果 `{review_id[:8]}…`")
+    rid_short = review_id[:8]
+    st.markdown(f"### 审查结果 `{rid_short}…`")
 
-    # ---- 状态条 ----
     status_info = {
         "completed": ("✅ 审查完成", "success"),
         "failed": ("❌ 审查失败", "error"),
@@ -224,13 +242,13 @@ def _render_review_result(review_id: str, auto_refresh: bool = False, scope: str
         "planning": ("📋 制定审查计划…", "info"),
         "reviewing": ("🔍 匹配 Playbook 规则…", "info"),
         "reflecting": ("🤔 自反思质量评估…", "info"),
-        "pending_human": ("👤 等待人工审核（MVP 不阻塞）", "info"),
+        "pending_human": ("👤 等待人工审核", "warning"),
         "generating": ("📝 生成报告中…", "info"),
     }
     msg, level = status_info.get(status, (f"状态: {status}", "info"))
     getattr(st, level)(msg)
 
-    if auto_refresh and status not in ("completed", "failed"):
+    if auto_refresh and status not in ("completed", "failed", "pending_human"):
         time.sleep(2)
         st.rerun()
 
@@ -238,7 +256,7 @@ def _render_review_result(review_id: str, auto_refresh: bool = False, scope: str
         st.error(f"错误：{detail['error_message']}")
         return
 
-    if status != "completed":
+    if status in ("pending", "parsing", "planning", "reviewing", "reflecting", "generating"):
         return
 
     # ---- 风险汇总卡片 ----
@@ -257,25 +275,57 @@ def _render_review_result(review_id: str, auto_refresh: bool = False, scope: str
         st.metric("📄 合同类型", detail.get("doc_type") or "未知")
         st.caption(f"总风险数: {total}")
 
-    if total == 0:
+    risks = detail.get("risks", [])
+    is_pending_human = status == "pending_human"
+
+    if total == 0 and status == "completed":
         st.success("🎉 未检出风险条款，合同合规！")
         _render_report_downloads(review_id, scope=scope)
         return
+
+    if total == 0 and is_pending_human:
+        st.success("🎉 未检出风险条款，可直接 Resume 生成报告。")
+        if st.button(
+            "📝 Resume 生成报告",
+            type="primary",
+            key=f"resume_zero_{rid_short}_{scope}",
+        ):
+            with st.spinner("正在 Resume 审查…"):
+                result = _resume_review(review_id)
+            if result:
+                st.success("✅ 已触发 Resume，报告生成中…")
+                time.sleep(2)
+                st.rerun()
+        return
+
     # ---- 风险明细 ----
     st.markdown("---")
-    _render_report_downloads(review_id, scope=scope)
-    st.markdown("---")
+
+    if status == "completed":
+        _render_report_downloads(review_id, scope=scope)
+        st.markdown("---")
+
     st.markdown("### 风险明细")
 
-    risks = detail.get("risks", [])
+    selected_risk_ids: list[str] = []
+
     for idx, risk in enumerate(risks, 1):
-        level = risk.get("risk_level", "low")
-        level_icon = _RISK_COLOR.get(level, "⚪")
-        level_label = _RISK_LABEL.get(level, level)
+        risk_id = risk.get("id", "")
+        level_name = risk.get("risk_level", "low")
+        level_icon = _RISK_COLOR.get(level_name, "⚪")
+        level_label = _RISK_LABEL.get(level_name, level_name)
+        human_decision = risk.get("human_decision")
+
+        exp_title = (
+            f"{level_icon} #{idx} [{level_label}] {risk.get('clause_number') or '—'} "
+            f"— {risk.get('description', '')[:60]}"
+        )
+        if human_decision and human_decision != "na":
+            exp_title += f" 👤{human_decision}"
 
         with st.expander(
-            f"{level_icon} #{idx} [{level_label}] {risk.get('clause_number') or '—'} — {risk.get('description', '')[:60]}",
-            expanded=(level == "high"),
+            exp_title,
+            expanded=(level_name == "high" and not human_decision),
         ):
             rc1, rc2 = st.columns([3, 1])
             with rc1:
@@ -296,17 +346,145 @@ def _render_review_result(review_id: str, auto_refresh: bool = False, scope: str
                 else:
                     st.caption("法规依据：无（法规知识库为空时降级显示）")
 
-                if risk.get("human_confirmed"):
-                    decision = risk.get("human_decision", "confirmed")
-                    st.caption(f"👤 人工已处理：{decision}")
+                if human_decision and human_decision != "na":
+                    st.caption(f"👤 人工已处理：`{human_decision}`")
 
             with rc2:
                 st.markdown(f"**置信度**：{risk.get('ai_confidence', '—')}")
                 st.markdown(f"**条款号**：{risk.get('clause_number') or '—'}")
+                st.markdown(f"**风险 ID**：`{risk_id[:8] if risk_id else '—'}`")
 
-    # ---- 人工审核区 ----
-    st.markdown("---")
-    st.markdown("### 👤 人工审核（MVP 占位）")
-    st.info(
-        "人工审核接口已就绪（`POST /api/compliance/reviews/{id}/human-review`），前端批量操作界面可在 P1 补全。当前风险可在上方列表逐条查阅确认。"
-    )
+            if is_pending_human and risk_id:
+                st.markdown("---")
+                chk_key = f"chk_{rid_short}_{risk_id}_{scope}"
+                checked = st.checkbox(
+                    "加入批量操作",
+                    value=False,
+                    key=chk_key,
+                )
+                if checked:
+                    selected_risk_ids.append(risk_id)
+
+                b1, b2, b3 = st.columns(3)
+                btn_confirm_key = f"btn_cfm_{rid_short}_{risk_id}_{scope}"
+                btn_false_key = f"btn_fls_{rid_short}_{risk_id}_{scope}"
+                btn_level_key = f"btn_lvl_{rid_short}_{risk_id}_{scope}"
+
+                if b1.button("✅ 确认无风险", key=btn_confirm_key):
+                    res = _human_review_action(review_id, [risk_id], "confirm")
+                    if res:
+                        st.success("已确认")
+                        time.sleep(1)
+                        st.rerun()
+
+                if b2.button("🚫 标记误报", key=btn_false_key):
+                    res = _human_review_action(review_id, [risk_id], "mark_false")
+                    if res:
+                        st.success("已标记误报")
+                        time.sleep(1)
+                        st.rerun()
+
+                with b3:
+                    new_level = st.selectbox(
+                        "调整等级",
+                        options=["保持", "high", "medium", "low"],
+                        index=0,
+                        key=f"sel_lvl_{rid_short}_{risk_id}_{scope}",
+                    )
+                    if new_level != "保持" and st.button(
+                        "应用等级",
+                        key=btn_level_key,
+                    ):
+                        res = _human_review_action(
+                            review_id,
+                            [risk_id],
+                            "modify_level",
+                            new_risk_level=new_level,
+                        )
+                        if res:
+                            st.success(f"已调整为 {new_level}")
+                            time.sleep(1)
+                            st.rerun()
+
+    # ---- 人工审核批量操作区 ----
+    if is_pending_human:
+        st.markdown("---")
+        st.markdown("### 👤 人工审核批量操作")
+
+        if risks:
+            batch_col1, batch_col2, batch_col3 = st.columns([2, 2, 1])
+
+            with batch_col1:
+                batch_action = st.selectbox(
+                    "批量操作",
+                    options=[
+                        "confirm",
+                        "mark_false",
+                    ],
+                    format_func=lambda x: {
+                        "confirm": "✅ 确认选中无风险",
+                        "mark_false": "🚫 选中为误报",
+                    }.get(x, x),
+                    key=f"batch_act_{rid_short}_{scope}",
+                )
+
+            with batch_col2:
+                all_risk_ids = [r.get("id") for r in risks if r.get("id")]
+                select_high_ids = [
+                    r.get("id") for r in risks if r.get("id") and r.get("risk_level") == "high"
+                ]
+                quick_col1, quick_col2, quick_col3 = st.columns(3)
+                if quick_col1.button("全选", key=f"sel_all_{rid_short}_{scope}"):
+                    for rid2 in all_risk_ids:
+                        st.session_state[f"chk_{rid_short}_{rid2}_{scope}"] = True
+                    st.rerun()
+                if quick_col2.button("仅高风险", key=f"sel_high_{rid_short}_{scope}"):
+                    for rid2 in all_risk_ids:
+                        st.session_state[f"chk_{rid_short}_{rid2}_{scope}"] = (
+                            rid2 in select_high_ids
+                        )
+                    st.rerun()
+                if quick_col3.button("清空", key=f"sel_clr_{rid_short}_{scope}"):
+                    for rid2 in all_risk_ids:
+                        st.session_state[f"chk_{rid_short}_{rid2}_{scope}"] = False
+                    st.rerun()
+
+            with batch_col3:
+                st.caption(f"已选 {len(selected_risk_ids)} 项")
+                if st.button(
+                    "执行批量",
+                    type="primary",
+                    disabled=len(selected_risk_ids) == 0,
+                    key=f"batch_run_{rid_short}_{scope}",
+                ):
+                    with st.spinner(f"正在对 {len(selected_risk_ids)} 项执行 {batch_action}…"):
+                        res = _human_review_action(
+                            review_id,
+                            selected_risk_ids,
+                            batch_action,
+                        )
+                    if res:
+                        st.success(f"✅ 已对 {len(selected_risk_ids)} 项执行 {batch_action}")
+                        time.sleep(1)
+                        st.rerun()
+
+        st.markdown("---")
+        resume_col1, resume_col2 = st.columns([1, 3])
+        resume_done = st.button(
+            "📝 确认并生成报告（Resume）",
+            type="primary",
+            key=f"resume_btn_{rid_short}_{scope}",
+        )
+        with resume_col2:
+            st.caption("Resume 后系统会合并人工决策 → 重新汇总风险等级 → 生成审查报告。")
+        if resume_done:
+            with st.spinner("正在 Resume 审查…"):
+                res = _resume_review(review_id)
+            if res:
+                st.success("✅ 已触发 Resume，报告生成中…")
+                time.sleep(2)
+                st.rerun()
+
+    if status == "completed":
+        st.markdown("---")
+        _render_report_downloads(review_id, scope=scope)

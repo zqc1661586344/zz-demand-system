@@ -73,7 +73,9 @@ def create_review(
             template_id=req.template_id,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        msg = str(e)
+        code = 403 if "forbidden" in msg.lower() else 400
+        raise HTTPException(status_code=code, detail=msg) from e
 
     if settings.use_celery_task and settings.celery_broker_url:
         from app.compliance.tasks import run_compliance_review
@@ -180,7 +182,9 @@ def human_review(
             note=req.note,
         )
     except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e)) from e
+        msg = str(e)
+        code = 403 if "forbidden" in msg.lower() else 400
+        raise HTTPException(status_code=code, detail=msg) from e
     return result
 
 
@@ -196,6 +200,7 @@ def resume_review(
     """人工确认后续跑 generate_report（HITL resume）。
 
     仅当 review.status == pending_human 且至少存在一条人工决策记录时可用。
+    使用条件 UPDATE 原子抢占状态（pending_human → generating），防并发重入。
     """
     review = _assert_review_access(db, review_id, current_user)
     if review.status != "pending_human":
@@ -225,6 +230,21 @@ def resume_review(
                 status_code=409,
                 detail="no human review decisions recorded — please review high risks before resuming",
             )
+
+    rows = (
+        db.query(ComplianceReview)
+        .filter(
+            ComplianceReview.id == review_id,
+            ComplianceReview.status == "pending_human",
+        )
+        .update({"status": "generating"}, synchronize_session=False)
+    )
+    db.commit()
+    if rows == 0:
+        raise HTTPException(
+            status_code=409,
+            detail="resume already in progress or status changed — please refresh",
+        )
     from app.compliance.harness.runtime import get_harness
 
     if settings.use_celery_task and settings.celery_broker_url:

@@ -55,7 +55,10 @@ def init_db():
 
 
 def _seed_roles() -> None:
-    """Create default roles (admin, editor, viewer) if they don't exist."""
+    """Create default roles (admin, legal, editor, viewer) if they don't exist.
+
+    legal 角色用于合规审查的人工审核（human-review / resume 端点）。
+    """
     from app.models.user import Role
 
     db = SessionLocal()
@@ -63,6 +66,7 @@ def _seed_roles() -> None:
         existing = {r.name for r in db.query(Role).all()}
         default_roles = [
             Role(name="admin", description="Administrator — full system access"),
+            Role(name="legal", description="Legal — compliance review, HITL operations"),
             Role(name="editor", description="Editor — can manage documents and workflows"),
             Role(name="viewer", description="Viewer — read-only access"),
         ]

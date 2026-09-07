@@ -447,15 +447,22 @@ class ComplianceHarness:
         }
 
     def review_clauses(self, state: dict) -> dict:
-        """节点 review：Playbook 命中 → 风险识别 → clause_id/rule_id 追溯注入 → RAG 引用校验。"""
+        """节点 review：Playbook 命中 → 风险识别 → clause_id/rule_id 追溯注入 → RAG 引用校验。
+
+        review_hints（来自 reflect 节点）：
+          - mode=playbook_only → 跳过 LLM 路径，只用 Playbook 命中（LLM 全失败降级）
+          - rag_top_k=N → RAG 引用检索扩大 top_k（无 verified 引用时用）
+        """
         guarded = self._guard_failed(state)
         if guarded is not None:
             return guarded
         self._persist_status(state["review_id"], STATUS_REVIEWING)
         clauses = state.get("clauses") or []
         rules = state.get("rules") or []
+        hints = state.get("review_hints") or {}
 
-        rr = self._risk_skill.execute({"clauses": clauses, "rules": rules})
+        risk_ctx = {"clauses": clauses, "rules": rules, "hints": hints}
+        rr = self._risk_skill.execute(risk_ctx)
         risk_data = rr.get("data") or {}
         raw_risks = risk_data.get("risks") if rr.get("ok") else []
         llm_error_count = int(risk_data.get("llm_error_count") or 0)
@@ -511,28 +518,26 @@ class ComplianceHarness:
           2. refs 为空但有 query → 主动检索法规，取 top-3 补充（verified=False, needs_human_check=True）
           3. 无 query → 跳过
 
-        重要：RAG 检索命中 ≠ 引用正确。检索拿到的是"候选依据"，法务需要人工确认。
-        只有 citation_verifier 判定通过的引用才会标 verified=True。
+        并发：ThreadPoolExecutor 按 risk 粒度并发 RAG 检索，最多 8 worker。
         """
         if not risks:
             return risks
-        verified_count = 0
-        supplemented_count = 0
-        low_score_filtered = 0
-        for risk in risks:
+
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        max_workers = min(8, len(risks))
+
+        def _enrich_one(risk: dict) -> dict:
             refs = list(risk.get("legal_references") or [])
             query = (risk.get("description") or risk.get("clause_number") or "").strip()
             if not query:
-                continue
-
+                return risk
             if refs:
                 rag_result = self._rag_skill.execute({"query": query, "references": refs})
                 if rag_result.get("ok"):
                     verified = (rag_result.get("data") or {}).get("references") or refs
                     for ref in verified:
-                        if ref.get("verified"):
-                            verified_count += 1
-                        else:
+                        if not ref.get("verified"):
                             ref.setdefault("needs_human_check", True)
                     risk["legal_references"] = verified
                 else:
@@ -543,16 +548,40 @@ class ComplianceHarness:
                 rag_result = self._rag_skill.execute({"query": query})
                 if rag_result.get("ok"):
                     hits = (rag_result.get("data") or {}).get("hits") or []
-                    injected = self._rag_hits_to_references(hits[:3])
+                    score_floor = 0.5
+                    qualified = [
+                        h
+                        for h in hits
+                        if float(h.get("score") or h.get("similarity") or 0.0) >= score_floor
+                    ]
+                    injected = self._rag_hits_to_references(qualified[:3])
                     if injected:
                         risk["legal_references"] = injected
-                        supplemented_count += 1
-                    low_score_filtered += max(0, len(hits) - 3)
+            return risk
+
+        with ThreadPoolExecutor(max_workers=max_workers) as pool:
+            futures = {pool.submit(_enrich_one, risk): risk for risk in risks}
+            for fut in as_completed(futures):
+                risk = futures[fut]
+                try:
+                    fut.result(timeout=15)
+                except Exception as e:  # noqa: BLE001
+                    logger.warning("rag enrichment failed for risk: %s", e)
+
+        verified_count = 0
+        supplemented_count = 0
+        for risk in risks:
+            for ref in risk.get("legal_references") or []:
+                if ref.get("verified"):
+                    verified_count += 1
+            refs = risk.get("legal_references") or []
+            if refs and not any(r.get("verified") for r in refs):
+                supplemented_count += 1
+
         logger.info(
-            "rag enrichment: verified=%d supplemented=%d filtered_low_score=%d total_risks=%d",
+            "rag enrichment(parallel): verified=%d supplemented=%d total_risks=%d",
             verified_count,
             supplemented_count,
-            low_score_filtered,
             len(risks),
         )
         return risks
@@ -581,7 +610,11 @@ class ComplianceHarness:
         return refs
 
     def reflect(self, state: dict) -> dict:
-        """多维度自反思：覆盖率 + 置信度 + 重审衰减 + 降级原因。"""
+        """多维度自反思：覆盖率 + 置信度 + 重审衰减 + 降级原因。
+
+        degraded_reasons 回流为 review_hints —— retry 时 review_clauses 能采取
+        纠正性策略（纯 Playbook 降级、扩大 RAG top_k、放宽阈值等），而不是空转重掷。
+        """
         guarded = self._guard_failed(state)
         if guarded is not None:
             return guarded
@@ -600,9 +633,11 @@ class ComplianceHarness:
         )
         next_retry = retry_count + 1
 
+        hints = self._build_review_hints(degraded, clauses, risks, rules)
+
         self._persist_status(state["review_id"], STATUS_REFLECTING, retry_count=next_retry)
         logger.info(
-            "reflect: q=%.2f cov=%.2f conf=%.2f retry=%d r=%d c=%d rules=%d degraded=%s",
+            "reflect: q=%.2f cov=%.2f conf=%.2f retry=%d r=%d c=%d rules=%d degraded=%s hints=%s",
             quality,
             coverage_score,
             avg_conf,
@@ -611,6 +646,7 @@ class ComplianceHarness:
             len(clauses),
             len(rules),
             degraded,
+            hints,
         )
 
         result = {
@@ -620,10 +656,49 @@ class ComplianceHarness:
             "coverage_score": round(coverage_score, 2),
             "avg_confidence": round(avg_conf, 2),
             "status": STATUS_REFLECTING,
+            "review_hints": hints,
         }
         if degraded:
             result["degraded_reasons"] = degraded
         return result
+
+    @staticmethod
+    def _build_review_hints(
+        degraded: list[str],
+        clauses: list,
+        risks: list,
+        rules: list,
+    ) -> dict:
+        """把 degraded_reasons 转为 review_hints（retry 时 review 策略调整输入）。
+
+        映射规则：
+          - no_playbook_rules → mode=llm_only（无规则，纯 LLM 审查）
+          - llm_failed_X/Y 且全失败 → mode=playbook_only（LLM 全挂，降级纯 Playbook）
+          - no_verified_references → rag_top_k=5（扩大 RAG 重检索范围）
+          - no_clauses_extracted → parse_retry=1（建议换解析策略）
+        """
+        hints: dict = {}
+        if "no_playbook_rules" in degraded:
+            hints["mode"] = "llm_only"
+            hints["note"] = "no Playbook rules available — pure LLM review"
+        if "no_clauses_extracted" in degraded:
+            hints["parse_retry"] = 1
+        if "no_verified_references" in degraded:
+            hints["rag_top_k"] = 5
+        for d in degraded:
+            if d.startswith("llm_failed_"):
+                try:
+                    ratio = d.split("_")  # ["llm", "failed", "X", "Y"]
+                    if len(ratio) == 4:
+                        failed_n = int(ratio[2])
+                        total_n = int(ratio[3])
+                        if total_n > 0 and failed_n >= total_n:
+                            hints["mode"] = "playbook_only"
+                            hints["note"] = "LLM failed all clauses — fallback to Playbook only"
+                            break
+                except (ValueError, IndexError):
+                    continue
+        return hints
 
     def compare_template(self, state: dict) -> dict:
         """企业模板比对：复用 Playbook standard_position 做偏离检测 + 建议补全 + 红线升级。"""

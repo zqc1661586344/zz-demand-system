@@ -63,6 +63,8 @@ async def lifespan(app: FastAPI):
     ensure_fts_index()
     # 恢复因异常退出而卡在 "processing" 状态的文档
     _recover_stuck_documents()
+    # 恢复因异常退出而卡在中间态的合规审查（>30min 超时置 failed）
+    _recover_stuck_reviews()
     yield
 
 
@@ -82,6 +84,70 @@ def _recover_stuck_documents() -> None:
                 "Reset %d stuck document(s) from 'processing' to 'pending'",
                 len(stuck),
             )
+    finally:
+        db.close()
+
+
+def _recover_stuck_reviews() -> None:
+    """启动时将卡在中间态超过 30 分钟的合规审查置为 failed。
+
+    排除 pending_human —— 那是正常等待人工审核的状态，不是卡死。
+    终态 completed / failed 不处理。
+
+    判定依据：ComplianceReview 无 updated_at，用 started_at + created_at 组合。
+      - started_at 存在且 <= cutoff → 执行中卡死（进程崩溃）
+      - started_at 为 None 但 created_at <= cutoff → 创建后从未开始（Celery 任务丢失）
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from sqlalchemy import and_, or_
+
+    from app.compliance.models.review import ComplianceReview
+
+    STUCK_STATUSES = (
+        "pending",
+        "parsing",
+        "planning",
+        "reviewing",
+        "reflecting",
+        "comparing",
+        "generating",
+    )
+    TIMEOUT_MINUTES = 30
+
+    db = SessionLocal()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(minutes=TIMEOUT_MINUTES)
+        stuck = (
+            db.query(ComplianceReview)
+            .filter(
+                ComplianceReview.status.in_(STUCK_STATUSES),
+                or_(
+                    ComplianceReview.started_at <= cutoff,
+                    and_(
+                        ComplianceReview.started_at.is_(None),
+                        ComplianceReview.created_at <= cutoff,
+                    ),
+                ),
+            )
+            .all()
+        )
+        if stuck:
+            for review in stuck:
+                review.status = "failed"
+                review.error_message = (
+                    f"Review stuck in '{review.status}' for >{TIMEOUT_MINUTES}min — "
+                    f"server restart recovery"
+                )
+            db.commit()
+            logger.warning(
+                "Recovered %d stuck compliance review(s) (status in %s, older than %dmin)",
+                len(stuck),
+                STUCK_STATUSES,
+                TIMEOUT_MINUTES,
+            )
+    except Exception as e:  # noqa: BLE001 — 回收失败不应阻断启动
+        logger.error("_recover_stuck_reviews failed (non-fatal): %s", e)
     finally:
         db.close()
 

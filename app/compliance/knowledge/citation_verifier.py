@@ -87,7 +87,7 @@ def verify_citation(ref_content: str, candidate_articles: list[dict]) -> bool:
         if not content_norm:
             continue
 
-        if ref_norm in content_norm and len(ref_norm) >= 2:
+        if ref_norm in content_norm and len(ref_norm) >= 10:
             logger.debug("citation verified: substring match (len=%d)", len(ref_norm))
             return True
 
