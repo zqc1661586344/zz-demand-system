@@ -36,6 +36,8 @@ dependencies = [
     "langchain-classic>=1.0.8",
     "langchain-postgres>=0.0.17",
     "langgraph-checkpoint-postgres>=3.1.2",
+    "datasets>=5.0.1",
+    "ragas>=0.2.15",
 ]
 
 [project.optional-dependencies]
@@ -53,7 +55,7 @@ compliance = [
 # bge-reranker 交叉编码器重排所需（默认 RAG_RERANK_ENABLED=false，不强制安装，
 # 单独装在服务器上往往因 torch/tokenizers 需本地编译而失败）
 rerank = ["transformers>=4.45.0", "torch>=2.0.0"]
-dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0", "ruff>=0.6.0", "mypy>=1.11.0"]
+dev = ["pytest>=8.0.0", "pytest-asyncio>=0.24.0", "ruff>=0.6.0", "mypy>=1.11.0", "ragas>=0.2.0,<0.3.0", "datasets>=2.14.0"]
 
 [tool.ruff]
 line-length = 100
