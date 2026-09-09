@@ -63,6 +63,7 @@ async def upload_document(
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
         "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
         "application/toml": ".toml",
+        "application/json": ".json",
     }
     ext_to_mime = {v: k for k, v in mime_to_ext.items()}
 

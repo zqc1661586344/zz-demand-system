@@ -97,9 +97,98 @@ def load_document(file_path: str, mime_type: str) -> list[Document]:
         loader = TomlLoader(str(path))
         return loader.load()
 
+    # json文件（自定义处理，兼容法规 seed_data 格式和通用 JSON）
+    elif mime_type == "application/json":
+        return _load_json(path)
+
     else:
         logger.error(f"unsupported MIME type for loading: {mime_type}")
         raise ValueError(f"Unsupported MIME type for loading: {mime_type}")
+
+
+def _load_json(path: Path) -> list[Document]:
+    """自定义 JSON 加载器，兼容多种格式：
+
+    1. 法规 seed_data 格式: {title, articles: [{article_number, chapter?, content}]}  → 每条条文一个 Document
+    2. 对象数组: [{key: value, ...}, ...]                                                    → 每个对象一个 Document
+    3. 字符串数组: ["text", ...]                                                             → 每个字符串一个 Document
+    4. 普通对象: {key: value, ...}                                                           → 整体一个 Document
+    """
+    with open(str(path), "r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    # 格式 1：法规 seed_data — 顶层有 articles 数组
+    if isinstance(data, dict) and isinstance(data.get("articles"), list):
+        regulation_title = data.get("title") or data.get("name") or path.stem
+        regulation_type = data.get("regulation_type", "")
+        docs: list[Document] = []
+        for art in data["articles"]:
+            content = art.get("content", "").strip()
+            if not content:
+                continue
+            parts = [f"# {regulation_title}"]
+            if regulation_type:
+                parts.append(f"类型：{regulation_type}")
+            if art.get("chapter"):
+                parts.append(f"章节：{art['chapter']}")
+            if art.get("article_number"):
+                parts.append(f"条文编号：{art['article_number']}")
+            parts.append("")
+            parts.append(content)
+            docs.append(
+                Document(
+                    page_content="\n".join(parts),
+                    metadata={
+                        "source": str(path),
+                        "regulation_title": regulation_title,
+                        "article_number": art.get("article_number", ""),
+                    },
+                )
+            )
+        if docs:
+            logger.info(
+                f"json (regulation format): extracted {len(docs)} articles from {regulation_title}"
+            )
+            return docs
+
+    # 格式 2：对象数组
+    if isinstance(data, list) and data and isinstance(data[0], dict):
+        docs = []
+        for item in data:
+            lines = []
+            for k, v in item.items():
+                if isinstance(v, (dict, list)):
+                    lines.append(f"{k}: {json.dumps(v, ensure_ascii=False)}")
+                else:
+                    lines.append(f"{k}: {v}")
+            docs.append(
+                Document(
+                    page_content="\n".join(lines),
+                    metadata={"source": str(path)},
+                )
+            )
+        logger.info(f"json (list of objects): {len(docs)} items")
+        return docs
+
+    # 格式 3：字符串数组
+    if isinstance(data, list) and data and isinstance(data[0], str):
+        docs = [
+            Document(page_content=item, metadata={"source": str(path)})
+            for item in data
+            if isinstance(item, str) and item.strip()
+        ]
+        logger.info(f"json (list of strings): {len(docs)} items")
+        return docs
+
+    # 格式 4：普通对象或其他 — 整体序列化为文本
+    docs = [
+        Document(
+            page_content=json.dumps(data, ensure_ascii=False, indent=2),
+            metadata={"source": str(path)},
+        )
+    ]
+    logger.info("json (generic): single document")
+    return docs
 
 
 def process_document(doc_id: str) -> None:

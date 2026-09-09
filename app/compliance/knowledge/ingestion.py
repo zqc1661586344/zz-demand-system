@@ -197,6 +197,7 @@ def _guess_mime(path: Path) -> str:
         ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
         ".toml": "application/toml",
+        ".json": "application/json",
     }
     return mapping.get(suffix, "text/plain")
 
