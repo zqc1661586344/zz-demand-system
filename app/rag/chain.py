@@ -288,7 +288,7 @@ def _retrieve_relevant_docs(
 
 def query_rag(
     query: str,
-    top_k: int = 5,
+    top_k: int = 10,
     history: list[dict] | None = None,
     summary: str | None = None,
     user_id: str | None = None,

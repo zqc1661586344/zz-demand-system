@@ -10,7 +10,18 @@ from app.streamlit_app.api_client import ApiError, delete, get, upload
 
 logger = get_logger(__name__)
 
-SUPPORTED_EXTENSIONS = [".pdf", ".txt", ".md", ".docx", ".csv", ".html", ".xlsx", ".pptx", ".toml"]
+SUPPORTED_EXTENSIONS = [
+    ".pdf",
+    ".txt",
+    ".md",
+    ".docx",
+    ".csv",
+    ".html",
+    ".xlsx",
+    ".pptx",
+    ".toml",
+    ".json",
+]
 MAX_SIZE_MB = 50
 
 
@@ -69,6 +80,7 @@ def page():
             ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
             ".toml": "application/toml",
+            ".json": "application/json",
         }
 
         success_count = 0

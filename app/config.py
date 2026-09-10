@@ -156,7 +156,7 @@ class Settings(BaseSettings):
     # 自反思质量阈值
     compliance_quality_threshold: float = 0.7
     # 法规检索 Top-K
-    compliance_rag_top_k: int = 5
+    compliance_rag_top_k: int = 10
     # Playbook 语义匹配阈值
     compliance_playbook_semantic_threshold: float = 0.8
     # 引用强制校验的原文相似度阈值（逐字匹配）

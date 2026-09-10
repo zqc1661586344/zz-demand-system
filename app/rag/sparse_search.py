@@ -53,11 +53,15 @@ _STOP_WORDS = {
 
 
 def tokenize_query(query: str) -> str:
-    """对查询做与索引一致的 jieba 分词并过滤停用词，空格 join。
+    """对查询做与索引一致的 jieba 分词并过滤停用词，用 " OR " 连接。
 
-    索引侧存储的是 `" ".join(_chinese_tokenizer(content))`，查询侧必须用同样的分词，否则 `simple` 全文配置下中文字符会被当作一个整体、无法与已切好的词条精确匹配。停用词过滤能避免 `websearch_to_tsquery` 的 AND 语义下泛词拖低长 query 召回。
+    索引侧存储的是 `" ".join(_chinese_tokenizer(content))`，查询侧必须用同样的分词，
+    否则 `simple` 全文配置下中文字符会被当作一个整体、无法与已切好的词条精确匹配。
+    用 OR 连接所有有效 token，使稀疏检索变为"任意关键词命中即可召回"，再用 ts_rank 按命中数量/权重排序，
+    比 plainto_tsquery 的 AND 语义召回率高一个数量级。
     """
-    return " ".join(t for t in _chinese_tokenizer(query) if t.strip().lower() not in _STOP_WORDS)
+    tokens = [t for t in _chinese_tokenizer(query) if t.strip().lower() not in _STOP_WORDS]
+    return " OR ".join(tokens)
 
 
 def ensure_fts_index() -> None:
@@ -112,17 +116,16 @@ def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Docum
                ts_rank(to_tsvector('simple', c.search_text), q.ts, 1) AS r
         FROM document_chunks c
         JOIN documents d ON d.id = c.document_id
-        CROSS JOIN (SELECT plainto_tsquery('simple', :q_str) AS ts) AS q
+        CROSS JOIN (SELECT websearch_to_tsquery('simple', :q_str) AS ts) AS q
         WHERE c.search_text IS NOT NULL
-          AND to_tsvector('simple', c.search_text) @@ q.ts  -- 仅返回真正命中关键词的行（无关查询为空）
-          AND ts_rank(to_tsvector('simple', c.search_text), q.ts, 1) > :min_rank  -- 过滤弱命中（与 SELECT 的 r 同为归一化尺度）
-          AND d.status = 'indexed'                           -- 跳过 failed/pending 等未完成文档的 chunk
+          AND to_tsvector('simple', c.search_text) @@ q.ts
+          AND d.status = 'indexed'
           AND {where}
         ORDER BY r DESC NULLS LAST
         LIMIT :k
         """
     )
-    params: dict = {"q_str": ts_query, "k": top_k, "min_rank": settings.rag_sparse_min_rank}
+    params: dict = {"q_str": ts_query, "k": top_k}
     if user_id is not None:
         params["uid"] = user_id
 
@@ -144,8 +147,7 @@ def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Docum
         # 统一 metadata：让稀疏结果的 document_id/源信息与稠密结果对齐，便于 RRF 去重。
         meta.setdefault("chunk_id", row["chunk_id"])
         meta.setdefault("content", row["content"])
-        # 稀疏质量分：SQL 里算出的归一化 ts_rank r（与 WHERE 把关同一尺度）。
-        # 把关已在 SQL WHERE 完成，此分仅透出供日志/调试，hybrid 不再重复过滤。
+        # 稀疏质量分：SQL 里算出的归一化 ts_rank r（与 WHERE 把关同一尺度）。把关已在 SQL WHERE 完成，此分仅透出供日志/调试，hybrid 不再重复过滤。
         meta.setdefault("sparse_score", row["r"])
         results.append(Document(page_content=row["content"], metadata=meta))
 
