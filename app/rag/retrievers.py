@@ -277,7 +277,7 @@ def _rebuild_bm25_for_key(key: str, texts: list[str], metadatas: list[dict]) -> 
         _bm25_map[key] = BM25Retriever.from_texts(
             texts,
             metadatas=metadatas,
-            k=settings.rag_rerank_top_n if settings.rag_rerank_enabled else 5,
+            k=max(settings.compliance_rag_top_k, settings.rag_rerank_top_n, 10),
             preprocess_func=_chinese_tokenizer,
         )
         _bm25_ts_map[key] = time.time()  # 记录本地时间戳
@@ -402,13 +402,25 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
 
     docs = _rrf_fuse(dense_docs, sparse_docs, settings.rag_hybrid_alpha)
 
-    # 【相关性兜底】稀疏侧已用 ts_rank 下限把关（真命中才进融合），此处只保留库空兜底：
-    # 当稠密侧对该 query 完全零相关（向量库空/embedding 失败，not scored）才判定 free chat。不再用 k=1 cosine 一刀切，避免误杀"关键词真命中但 bge-m3 余弦低"的正确结果。
+    # 【相关性兜底】融合后再用 dense 侧 top1 分数判定是否需要 free chat。
+    # 只检查 "dense 是否完全空" 太松——embedding 总会返回向量，PGVector 总能搜到邻近，
+    # 但 top1 的 cosine 可能极低（query 和文档集完全不相关）。
+    # 这里用 rag_min_score 做最终把关：dense top1 < 阈值 → 即使 sparse 有弱命中
+    # （刚好过 min_rank），也说明 query 真的不在知识库范围内，走 free chat。
     if docs:
         scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
         if not scored:
             logger.info(
                 "hybrid path but cosine found no match at all → free chat",
+            )
+            return []
+        top1 = scored[0][1]
+        if top1 < settings.rag_min_score:
+            logger.info(
+                "hybrid path but dense top-1=%.3f < min_score=%.3f → free chat "
+                "(sparse hit too weak to justify RAG)",
+                top1,
+                settings.rag_min_score,
             )
             return []
 
@@ -426,7 +438,7 @@ def _maybe_rerank(query: str, docs: list[Document]) -> list[Document] | None:
 
     返回重新排序后的前N个文档，或者当重新排序器被禁用或不可用时返回 None。
     """
-    from app.rag.rerankers import get_reranker
+    from app.rag.rerankers import get_reranker, mark_reranker_failed
 
     reranker = get_reranker()
     if reranker is None:
@@ -437,4 +449,5 @@ def _maybe_rerank(query: str, docs: list[Document]) -> list[Document] | None:
         return list(reranked)[: settings.rag_rerank_top_n]
     except Exception as exc:  # noqa: BLE001 — broad catch is intentional: fall back gracefully
         logger.warning(f"reranker failed, falling back to unranked results: {exc}")
+        mark_reranker_failed()
         return None

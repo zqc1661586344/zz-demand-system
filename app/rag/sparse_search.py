@@ -119,13 +119,18 @@ def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Docum
         CROSS JOIN (SELECT websearch_to_tsquery('simple', :q_str) AS ts) AS q
         WHERE c.search_text IS NOT NULL
           AND to_tsvector('simple', c.search_text) @@ q.ts
+          AND ts_rank(to_tsvector('simple', c.search_text), q.ts, 1) >= :min_rank
           AND d.status = 'indexed'
           AND {where}
         ORDER BY r DESC NULLS LAST
         LIMIT :k
         """
     )
-    params: dict = {"q_str": ts_query, "k": top_k}
+    params: dict = {
+        "q_str": ts_query,
+        "k": top_k,
+        "min_rank": settings.rag_sparse_min_rank,
+    }
     if user_id is not None:
         params["uid"] = user_id
 

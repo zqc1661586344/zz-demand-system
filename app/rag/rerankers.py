@@ -1,18 +1,19 @@
 """Reranker configuration — local HuggingFace or remote API (硅基流动等)."""
 
 import threading
-from functools import lru_cache
-from typing import Any
+import time
 
 import httpx
 from langchain_community.cross_encoders.base import BaseCrossEncoder
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import settings
 from app.logging_config import get_logger
 
 
 logger = get_logger(__name__)
+
+_RERANK_COOLDOWN_SEC = 300  # 单次失败后冷却 5 分钟再重试
 
 
 class RemoteAPIRerank(BaseModel, BaseCrossEncoder):
@@ -26,10 +27,11 @@ class RemoteAPIRerank(BaseModel, BaseCrossEncoder):
     """
 
     api_url: str
-    api_key: str
+    api_key: str = Field(repr=False)
     model: str
     top_n: int = 5
     timeout: float = 10.0
+    max_retries: int = 2
 
     model_config = ConfigDict(extra="forbid", protected_namespaces=())
 
@@ -39,23 +41,46 @@ class RemoteAPIRerank(BaseModel, BaseCrossEncoder):
         query = text_pairs[0][0]
         documents = [p[1] for p in text_pairs]
 
-        resp = httpx.post(
-            self.api_url,
-            headers={"Authorization": f"Bearer {self.api_key}"},
-            json={
-                "model": self.model,
-                "query": query,
-                "documents": documents,
-                "top_n": self.top_n,
-            },
-            timeout=self.timeout,
-        )
-        resp.raise_for_status()
+        transport = httpx.HTTPTransport(retries=self.max_retries)
+        try:
+            resp = httpx.post(
+                self.api_url,
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={
+                    "model": self.model,
+                    "query": query,
+                    "documents": documents,
+                    "top_n": self.top_n,
+                },
+                timeout=self.timeout,
+                transport=transport,
+            )
+            resp.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            logger.warning(
+                f"rerank API returned HTTP {e.response.status_code}: {e.response.text[:200]}"
+            )
+            raise
+        except httpx.RequestError as e:
+            logger.warning(f"rerank API request failed after retries: {e}")
+            raise
+
         data = resp.json()
 
+        if not isinstance(data, dict) or "results" not in data:
+            logger.warning(
+                f"rerank API response missing 'results' key, keys={list(data.keys()) if isinstance(data, dict) else type(data).__name__}"
+            )
+            return [0.0] * len(documents)
+
         scores = [0.0] * len(documents)
-        for item in data.get("results", []):
-            scores[item["index"]] = item["relevance_score"]
+        for item in data["results"]:
+            if "index" not in item or "relevance_score" not in item:
+                continue
+            try:
+                scores[item["index"]] = item["relevance_score"]
+            except IndexError:
+                continue
         return scores
 
 
@@ -78,6 +103,7 @@ def _resolve_api_key() -> str:
 
 _built_reranker = None
 _reranker_lock = threading.Lock()
+_reranker_fail_ts: float | None = None
 
 
 def get_reranker():
@@ -85,14 +111,22 @@ def get_reranker():
 
     返回 langchain 的 CrossEncoderReranker（可直接传给 langchain_classic 的
     ContextualCompressionRetriever），或 None 表示不可用。
+
+    临时故障（API 超时/500）走冷却机制：记录失败时间，_RERANK_COOLDOWN_SEC 内
+    返回 None，超时后重试。配置缺失/依赖安装失败则是永久 False（直到进程重启）。
     """
-    global _built_reranker
-    if _built_reranker is not None:
-        return _built_reranker if _built_reranker is not False else None
+    global _built_reranker, _reranker_fail_ts
 
     with _reranker_lock:
+        if _built_reranker is False:
+            return None
+
         if _built_reranker is not None:
-            return _built_reranker if _built_reranker is not False else None
+            if _reranker_fail_ts is not None:
+                if time.time() - _reranker_fail_ts < _RERANK_COOLDOWN_SEC:
+                    return None
+                _reranker_fail_ts = None
+            return _built_reranker
 
         if not settings.rag_rerank_enabled:
             logger.info("reranker disabled by config")
@@ -145,3 +179,11 @@ def get_reranker():
             logger.error(f"failed to load reranker: {exc}")
             _built_reranker = False
             return None
+
+
+def mark_reranker_failed() -> None:
+    """_maybe_rerank 异常时调用，触发冷却降级而非永久禁用。"""
+    global _reranker_fail_ts
+    with _reranker_lock:
+        _reranker_fail_ts = time.time()
+        logger.warning(f"reranker marked failed, cooling down for {_RERANK_COOLDOWN_SEC}s")

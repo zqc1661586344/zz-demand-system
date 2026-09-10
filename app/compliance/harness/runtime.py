@@ -599,7 +599,10 @@ class ComplianceHarness:
             refs.append(
                 {
                     "ref_type": "regulation_retrieved",
-                    "ref_name": h.get("title") or h.get("regulation_id") or "",
+                    "ref_name": h.get("regulation_title")
+                    or h.get("title")
+                    or h.get("regulation_id")
+                    or "",
                     "ref_article": h.get("article_number") or h.get("article_id") or "",
                     "ref_content": h.get("content") or "",
                     "verified": False,

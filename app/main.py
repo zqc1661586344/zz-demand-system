@@ -134,9 +134,10 @@ def _recover_stuck_reviews() -> None:
         )
         if stuck:
             for review in stuck:
+                original_status = review.status
                 review.status = "failed"
                 review.error_message = (
-                    f"Review stuck in '{review.status}' for >{TIMEOUT_MINUTES}min — "
+                    f"Review stuck in '{original_status}' for >{TIMEOUT_MINUTES}min — "
                     f"server restart recovery"
                 )
             db.commit()

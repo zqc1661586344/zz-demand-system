@@ -1,138 +1,128 @@
-# 合规审查模块（app/compliance）代码评审 · 第六轮
+
+# 合规审查 + RAG 模块代码评审 · 第八轮
+
 
 ## 一、问题清单（按严重性排序）
 
-### 问题 1（重要・架构/正确性）：LLM 模式下 Playbook 确定性匹配仍完全旁路——红线规则无兜底层（上轮问题 6 未修）
 
-- **位置**：`harnessruntime.py` `review_clauses()` L450（只调 `RiskSkill`）；`agentsreviewer.py` `review_clause()` L107–125
-- **机理**：非 test 模式下，`match_rules_for_clauses` **只在 `review_clause` 的 structured LLM 为 None 时才被调用**（降级路径 L110–112）。正常 LLM 路径把全部规则塞进 prompt 当"线索"，LLM 结果不与确定性命中做后置融合。LLM 漏报 = 红线条款直接漏检。
-- **本轮变化**：`PlaybookSkill` 死代码已删除（点赞），但**删除了死代码不等于接入了确定性层**。当前 LLM 路径仍然只靠 prompt hints，没有"确定性命中 + LLM 融合去重"的后置步骤。
-- **业界对照**：合规场景的标准做法是"确定性规则层保底 + LLM 增量发现"，两层结果按 `(clause_number, playbook_rule_id)` 去重融合，规则命中永不被 LLM 否决。
-- **修复方向**：在 `review_clauses` 节点内，先调 `match_rules_for_clauses` 获取确定性命中，再调 `RiskSkill`（LLM 路径），最后按 `(clause_number, playbook_rule_id)` 做 union——确定性命中始终保留，LLM 补充新发现。
-- **评分影响**：Playbook 规则匹配流程 4/10（确定性引擎本身可用，但 LLM 模式绕过了它）。
+### 问题 1（严重・正确性/上线阻断）：`compliance_human_actions.note` 迁移缺失——第四轮指出，连续四轮未修
+**位置**：`alembic/versions/b2d3c4e5f6a7_add_review_id_fk_fixes.py`（无 note 列）；`app/compliance/models/report.py:47`（模型有 `note`）；`review_service.py::human_action` 写 note
 
-### 问题 2（重要・可靠性）：reflect→review 重试仍是"空转循环"——无纠正性反馈输入（上轮问题 11 未修）
+**验证**：本轮 `git diff -- alembic/` 为空；两个迁移文件均无 note 列。**存量库人工审核写 note 必崩 `Unknown column`**。
 
-- **位置**：`runtime.py` `reflect()` L568–607、`should_retry()` L797–826、`compute_reflect_quality` L112（`decay = 0.15 * retry_count`）
-- **本轮改善**：`should_retry` 增加了两个短路条件——零规则+零风险跳过 retry（空转保护）、LLM 全失败跳过 retry（必败保护），**这显著减少了无意义的空转**，是实质进步。
-- **残余问题**：当 retry 确实触发时（quality < 0.7 且有部分风险），re-enter `review_clauses` 时 clauses/rules/prompt **与上一轮完全相同**，`degraded_reasons` 不回流给任何节点。确定性路径结果恒等，LLM 路径也只是原样重掷。decay 保证 quality 单调递减 → 数学上"重试直到预算耗尽"仍是必然。
-- **业界对照**：Reflexion/Self-Refine 类模式的核心是"把反思结论作为下一轮的输入"。建议：
-  1. 无规则 → 降级为纯 LLM 审查并放宽阈值；
-  2. 无 verified 引用 → 扩大 `top_k` 重检索；
-  3. 条款抽取为空 → 换解析策略；
-  4. 确定性场景直接短路跳过 retry（已部分实现）。
-- **评分影响**：Reflect 自反思与重试 5/10（短路保护加分，但纠正反馈仍未实现）。
+**修复**（3 行，已第三次给出）：
+```python
+op.execute(sa.text("ALTER TABLE compliance_human_actions ADD COLUMN IF NOT EXISTS note TEXT"))
+```
+**根治建议**：接入 `alembic check`（模型 vs 迁移 diff 校验）进 CI——本次问题本质是"模型加列→忘迁移"反复发生，机制缺失。
 
-### 问题 3（重要・性能/成本）：逐条款串行 LLM + 逐风险串行 embedding，无并发/超时/缓存/成本上限（上轮问题 13 未修）
+### 问题 2（重要・正确性）：RAG 生成幻觉仍是当前最大短板——faithfulness 平均仅 0.61~0.66
+**位置**：`scripts/eval_results_labor_rag.csv` / `eval_results_labor_k10_rag.csv`（实测数据）
 
-- **位置**：`agentsreviewer.py` `review_all()` L127–140（for 循环逐条 invoke）；`runtime.py` `_enrich_references_with_rag()` L509–563（逐风险串行检索+校验）
-- **量化**：50 条款合同 = 50 次串行 LLM 调用 + R 次串行 embedding 调用。无任何 per-call timeout、无 `asyncio.gather`/线程池并发、无相同 query 的 embedding 缓存、无 token/成本预算闸。
-- **业界对照**：批量并发（受限流闸）+ 指数退避重试 + 语义缓存是 RAG/Agent 流水线标配；LangGraph 可用 `Send` API 做条款级 map-reduce 并行。
-- **评分影响**：性能与成本 4/10。
+**证据**（我直接统计了结果 CSV）：
+| 指标 | top_k=5 | top_k=10 |
+|---|---|---|
+| faithfulness | 0.606 | 0.663 |
+| answer_relevancy | 0.762 | 0.797 |
+| context_recall | 0.698 | 0.743 |
+| context_precision | 0.659 | 0.607 |
 
-### 问题 4（重要・可靠性/运维）：卡死审查无回收机制，`lifespan` 缺少 `_recover_stuck_reviews`
+**问题**：忠实度低于 0.7，意味着约 1/3 的答案陈述无法被检索上下文支撑——**幻觉是当前系统最大的质量问题**；而 top_k=10 提升 recall 但 precision 下降（0.607），说明**只调 top_k 是拿精度换召回**，根因可能在于：(1) LLM 未被强制约束到上下文（`sanitize_citations` 只删引用不改内容）；(2) 检索到不相关内容混入（precision 低 → 生成器被带偏）。**这是 RAGAS 落地后的核心价值——现在有客观数字了，下一步优化有了靶子。**
 
-- **位置**：`appmain.py` lifespan（有 `_recover_stuck_documents` 却没有 compliance 对应物）；`runtime.py` `start_review` 的异常处理
-- **本轮改善**：`start_review` 现在区分瞬时/永久异常并 re-raise 瞬时异常让 Celery autoretry 生效（问题 12 部分修复，点赞）。`tasks.py` 的 `run_compliance_review` 配置专业（`acks_late`、`reject_on_worker_lost`、`time_limit`、`soft_time_limit`）。
-- **残余问题**：
-  1. BackgroundTasks 模式（默认，CELERY_BROKER_URL 为空）下进程重启 = 任务蒸发，review 永久卡在 `parsing`/`reviewing`，无超时、无 watchdog、无启动回收；
-  2. 即使有 checkpointer 存了断点，也没有"从 checkpoint 续跑卡死任务"的机制；
-  3. `_persist_status` 的 `except` 吞掉一切异常 → 某些场景下 review 状态更新失败但不报错。
-- **修复方向**：lifespan 增加 `_recover_stuck_reviews`（超时 > 30min 的 review 置 failed 或从 checkpoint 续跑）；resume 端点用条件 UPDATE 做乐观锁防并发重入。
-- **评分影响**：任务调度 6/10（Celery 配置专业，但 BackgroundTasks 模式仍无保护）。
+**建议**：优先优化 faithfulness：(1) prompt 增加"只依据给定材料回答，材料没有的明确说不知道"；(2) 提高 `rag_rerank_top_n` 相关度过滤（rerank 已默认开）；(3) 把这两组结果作为回归基线，每周重跑对比。
 
-### 问题 5（重要・权限/契约）：超管分页口径、forbidden 状态码、legal 角色播种（上轮问题 14 部分修复）
+### 问题 3（重要・正确性）：`_rag_hits_to_references` 键名 bug——连续五轮未修
+**位置**：`app/compliance/harness/runtime.py:602`（`h.get("title")`，检索 hit 键名是 `regulation_title`）
 
-- **位置**：
-  1. `apireviews.py` `list_reviews()` L109–125：**本轮已修**——admin 时 `user_id=None` 正确传入 service，total 和 items 口径统一（点赞）；
-  2. `create_review` L75–76：service 抛 `ValueError("forbidden: ...")` **仍被映射为 400**，应为 403；
-  3. `require_roles("admin", "legal")`（L143/L171/L196）：全系统**"legal" 角色仍无创建入口**（只播种了 admin/viewer），人工审核事实上 admin-only；
-  4. README 端点路径 `/reviews/<review-id>/human` vs 实际路由 `human-review`（L171）**仍未修正**。
-- **评分影响**：API 鉴权 7.5/10（分页修复加分，但 400/403 和 legal 角色未修）。
+**问题**：主动补充的法规引用在报告里法规名显示为 UUID。一行修复：`h.get("regulation_title") or h.get("title") or ""`。**这个 bug 已经在合规报告里持续存在五轮**，直接影响法务阅读，请本轮务必修。
 
-### 问题 6（一般・正确性）：`compare_template` 逻辑已下线但函数体仍保留错误匹配代码
+### 问题 4（一般・正确性）：`RemoteAPIRerank.score()` 无重试/退避、无响应 schema 校验 → 生产环境下 rerank API 瞬时故障直接降级
 
-- **位置**：`runtime.py` `compare_template()` L628–683；`should_compare()` L791–796
-- **本轮改善**：`should_compare` 恒返回 `"skip"` 并附详细注释说明下线原因（点赞），这是正确的防御性措施。
-- **残余问题**：`compare_template` 函数体仍存在，其匹配逻辑（L638–648 `rule.match_pattern` 与 `cn`（clause_number）做子串互含判断）仍恒不命中。虽然当前不可达，但：
-  1. 代码维护者可能误以为函数可用而取消 skip；
-  2. `_persist_status(..., template_deviations=deviations)` 的 `template_deviations` 列在 `ComplianceReview` ORM 中不存在，会被 `hasattr` 静默丢弃。
-- **建议**：要么把函数体改为 `raise NotImplementedError("P1: template comparison not implemented")`，要么在函数体开头加 assert False 兜底。
-- **评分影响**：模板比对 2/10（诚实下线加 1 分，但死代码仍有误导风险）。
+- **位置**：`ragrerankers.py` `RemoteAPIRerank.score()` L42–58
+- **机理**：远端 Rerank API 调用只有 `timeout=self.timeout`（默认 10s），**无任何重试机制**。硅基流动等国内 API 在网络抖动、限流、服务不稳定时返回 429/500/502 的概率不低，`resp.raise_for_status()` 直接抛异常 → `_maybe_rerank` 的 broad except 捕获 → 回退无 rerank 的原始排序。功能上不会崩溃，但：
+  1. 一次瞬时失败就永久降级到无 rerank（`_built_reranker` 被设为 `False`，**后续所有请求都跳过 rerank**，直到进程重启）；
+  2. 响应 JSON 无 schema 校验——如果 API 返回非标准格式（如 `{"error": "..."}` 而非 `{"results": [...]}`），`data.get("results", [])` 返回空列表，scores 全 0.0，**rerank 把所有文档排到末尾**而非降级。
+- **修复方向**：
+  1. `score()` 内加 `httpx` 重试（`transport=httpx.HTTPTransport(retries=2)` 或手动 try+sleep 一次）；
+  2. `_built_reranker = False` 应改为**临时降级**（如设一个 `_reranker_fail_ts = time.time()`，5 分钟后重试），而非永久性标记；
+  3. 响应校验：`if not data.get("results"): logger.warning(...); return [0.0] * len(documents)` 保持原序。
+- **评分影响**：Reranker 6.5/10。
 
-### 问题 7（一般・正确性）：引用校验短文本放行过宽 + RAG 补充引用无分数下限
+### 问题 5（一般・正确性）：BM25 检索数量绑定 `rag_rerank_top_n` → rerank 关闭时 BM25 只取 5 条但 RRF 融合期望更多候选
 
-- **位置**：`knowledgecitation_verifier.py` L90（`ref_norm in content_norm and len(ref_norm) >= 2`）；`runtime.py` `_enrich_references_with_rag` L528–535
-- **本轮改善**：coverage 算法改用 `get_matching_blocks` 做单向覆盖率（点赞）；短文本（<15 字符归一化后）只走精确子串判定（点赞）；空库诚实降级 verified=False（点赞）。
-- **残余问题**：
-  1. 精确子串匹配阈值仍为 `len >= 2`（归一化后），"工资""保密"这类双字词仍会误匹配为 verified=True；
-  2. RAG 补充引用 `hits[:3]` 无 score floor——低分命中仍会进入报告作为"候选法规依据"；
-  3. 种子数据中的"占位示例条文"标记未被过滤。
-- **修复方向**：子串放行阈值提到 ≥10 字（归一化后）；补充引用加 score floor（如 0.5）；种子入库前过滤占位标记。
-- **评分影响**：法规检索与引用校验 7/10。
-
-### 问题 8（一般・架构）：ORM 与 migration 的 `ondelete` 声明不一致
-
-- **位置**：`modelsreport.py` L41（`ForeignKey("compliance_risks.id")`，无 `ondelete`）；migration `b2d3c4e5f6a7` L82–86（`ON DELETE SET NULL`）
-- **影响**：DB 层 FK 约束有 `SET NULL`（migration 正确），但 ORM 模型未声明 `ondelete="SET NULL"`。SQLAlchemy 在 ORM 层做 `session.delete()` 时不知道级联策略，可能产生不必要的额外 DELETE 语句。同时，新开发者看 ORM 模型无法知道 DB 层的真实行为。
-- **修复**：在 ORM 中补上 `ondelete="SET NULL"`：
+- **位置**：`ragretrievers.py` `_rebuild_bm25_for_key()` L292–294
+- **机理**：
   ```python
-  risk_id = Column(String(36), ForeignKey("compliance_risks.id", ondelete="SET NULL"), nullable=True)
+  k=settings.rag_rerank_top_n if settings.rag_rerank_enabled else 5,
   ```
+  当 `rag_rerank_enabled=True` 时，BM25 retriever 的 `k` 被设为 `rag_rerank_top_n`（默认 5）。但 `hybrid_search` 调用 `_sparse_docs(query, top_k, user_id)` 时传入的 `top_k` 是请求级的 top_k（默认也是 5），然后 BM25 的 `get_relevant_documents(query)[:top_k]` 再做截断。**问题在于**：RRF 融合的质量依赖于两路都提供足够多的候选——如果 BM25 只返回 5 条、dense 也只返回 5 条，融合后最多 10 条候选再 rerank 到 5 条。这在 `top_k=5` 时没问题，但如果用户请求 `top_k=10`，BM25 仍只返回 5 条（因为 BM25Retriever 的 `k` 在构建时已固定为 5），**稀疏侧的召回量被截断**。
+- **修复方向**：BM25 的 `k` 应设为 `max(settings.rag_rerank_top_n, 10)` 或动态取 `max(top_k, rerank_top_n)`（需要把 k 从构建时移到查询时）。
+- **评分影响**：混合检索 7/10。
 
-### 问题 9（一般・正确性）：`_persist_results` 的 delete-recreate 模式导致引用重建和 human_action risk_id 置 NULL
+### 问题 6（一般・正确性）：`sparse_search.py` SQL 中引用 `c.meta` 列，但 `pipeline.py` 写入的列名是 `meta_json`
 
-- **位置**：`runtime.py` `_persist_results()` L269–272（先删全部旧 risks 再重建）
-- **机理**：虽然本轮修复了 risk id 保留（`r.get("id") or str(uuid4())`），但 `_persist_results` 仍然：
-  1. 先 `DELETE FROM compliance_risks WHERE review_id=...`（L269–272）
-  2. 因为 migration 加了 `ON DELETE SET NULL`，`compliance_human_actions.risk_id` 被置为 NULL
-  3. 然后重新 INSERT 相同 id 的 risk 行
-  4. 但 `human_actions.risk_id` 已经 NULL，不会自动恢复指向
-- **影响**：在 `human_review` 节点调 `_persist_result`（L719–733）后又调 `resume_review` → `_merge_human_decisions` 查 DB 时，`human_actions` 行的 `risk_id` 已 NULL → 无法关联到具体风险行。不过当前 `human_action` API 直接修改 `ComplianceRisk` 行的字段（`human_decision`/`risk_level`/`suggestion`），`_merge_human_decisions` 是从 `ComplianceRisk` 行读取而非从 `human_actions` 表读取，所以**实际链路不受影响**。但 `human_actions` 留痕表的审计价值降低（risk_id 全 NULL）。
-- **修复方向**：改为 upsert（按 id 更新而非 delete-recreate），或仅在 `human_review` 节点跳过 risk 的 delete-recreate（因为此时 risks 刚从 state 落库，不需要删）。
+- **位置**：`ragsparse_search.py` `search()` L128（`c.meta`）vs `ragpipeline.py` L234（`meta_json=json.dumps(...)`）
+- **机理**：`sparse_search.py` 的 SQL 查询 `SELECT c.id AS chunk_id, c.content, c.meta, ...`，但 `pipeline.py` 写入 DocumentChunk 时用的字段名是 `meta_json`。如果 ORM 模型中列名确实是 `meta_json`（而非 `meta`），这条 SQL 在 PG 上会报 `column c.meta does not exist`。如果 ORM 定义中有 `Column("meta", ...)` 映射则没问题，但需要确认。
+- **影响**：如果列名不匹配，PG tsvector 后端的稀疏检索**每次查询都失败**→回退 BM25 内存后端（`except` 捕获后返回空列表），但日志只记 warning 不报错，用户无感知。
+- **修复**：确认 DocumentChunk ORM 的 meta 列名；如果是 `meta_json`，SQL 改为 `c.meta_json AS meta`。
 
-### 问题 10（一般・正确性）：Extractor 伪正则和 8000 字截断仍存在（上轮问题 18 未修）
+### 问题 7（一般・架构）：`rerankers.py` 有 3 个未使用的 import
 
-- **位置**：`agentsextractor.py` L24（关键词 `"自.*起至"` 走 `kw in haystack` 字面子串匹配，**永远不命中**——正则当字符串用了）；`agentsextractor_prompt.py`（`max_chars=8000` 硬截断）
-- **影响**：`_CLAUSE_TYPE_RULES` 中 `"自.*起至"` 这一条永远不匹配（`"自.*起至" in "自2026年1月1日起至..."` 为 False，因为 `.*` 是字面量而非正则）。长合同后半部的期限/争议解决条款必丢。
-- **修复**：用 `re.search(kw, haystack)` 替换 `kw in haystack`（仅对含正则特殊字符的关键词），或把 `"自.*起至"` 改为普通关键词 `"起至"`。
+- **位置**：`ragrerankers.py` L3–4
+  - `from functools import lru_cache` — 未使用（`get_reranker` 用的是手动 global + lock 模式）
+  - `from typing import Any` — 未使用
+  - `BaseCrossEncoder` 的导入用于 `RemoteAPIRerank` 的基类声明，这个是正确的
+- **修复**：删除 `lru_cache` 和 `Any` 两个 import。
 
-### 问题 11（提示・前端联动）：Streamlit 侧无 HITL 操作与 resume 入口
+### 问题 8（一般・正确性）：`_recover_stuck_reviews` 的 error_message bug 仍未修复（上轮问题 1 未修）
 
-- **位置**：`appcompliance.py`
-- **本轮变化**：未见前端 HITL 相关改动。
-- **影响**：后端 HITL 链路已修复（问题 1/2/3 已修），但前端仍无调用 `/human-review` 或 `/resume` 的代码 → 默认配置下高风险审查在产品界面上**永久停在 pending_human**，只能靠 curl。
-- **评分影响**：产品可用性 4/10。
+- **位置**：`appmain.py` `_recover_stuck_reviews()`
+- **机理**：先 `review.status = "failed"` 再读 `review.status` 拼 error_message → 永远打印 "stuck in 'failed'"。
+- **修复**：一行修复——`original_status = review.status` 在覆盖之前保存。
 
-### 问题 12（提示・安全）：法规 file_path 旁路副本 + 异常透传（上轮问题 15 残余）
+### 问题 9（一般・架构）：`ReviewState` TypedDict 仍未声明 `review_hints` 和 `llm_error_count`（上轮问题 2 未修）
 
-- **位置**：`servicesregulation_service.py` `create_regulation()` 中的 file_path 分支；`apiknowledge.py` 异常处理
-- **本轮改善**：`schemasregulation.py` 的路径监狱校验（resolve + symlink 拒绝 + 后缀白名单）已完善（点赞）；知识 API 的异常处理有所改善。
-- **残余问题**：
-  1. `RegulationService.create_regulation` 中的 file_path 分支仍绕过 schema 校验直接调 `ingest_from_file`——当前零调用是运气不是设计；
-  2. `HTTPException(500, f"ingest failed: {exc}")` 仍可能把内部异常文本透传给客户端。
+- **位置**：`compliancestate.py` `ReviewState`
+- **影响**：功能不受影响（LangGraph `total=False` 模式），但 IDE 无法检测拼写错误、可读性下降。
 
----
 
-## 二、对比业界标准的改进路线（按优先级）
+### 问题 10（提示・架构）：4 个死配置项仍声明但未使用（上轮问题 7 未修）
 
-**P0（立即修完）**
+- **位置**：`appconfig.py`
+  - `compliance_citation_similarity_threshold`（L197，citation_verifier 硬编码 0.8/0.5）
+  - `compliance_playbook_semantic_threshold`（L195，semantic 引擎未使用）
+  - `compliance_hitl_auto_confirm_low`（L203，"低风险自动确认"未实现）
+  - `compliance_default_contract_type`（L209，review_service 硬编码 "labor_contract"）
 
-1. **Playbook 确定性层融合**（问题 1）：在 `review_clauses` 节点内，先 `match_rules_for_clauses` 获取确定性命中，再调 LLM，按 `(clause_number, playbook_rule_id)` union 去重。红线命中不可被 LLM 否决。
-2. **前端 HITL 入口**（问题 11）：Streamlit 合规审查页增加"人工审核"操作面板（调 `/human-review`）和"确认并生成报告"按钮（调 `/resume`）。
-3. **forbidden 映射 403**（问题 5.2）：`create_review` 捕获 `ValueError("forbidden:...")` 时 raise 403。
+### 问题 11（提示・正确性）：Extractor 伪正则仍存在（上轮问题 8 未修）
 
-**P1（生产化）**
+- **位置**：`complianceextractor.py`（`"自.*起至"` 走 `kw in haystack` 字面子串匹配）
 
-1. **reflect 纠正反馈**（问题 2）：degraded_reasons 回流——无规则 → 放宽阈值；无 verified 引用 → 扩大 top_k；LLM 全失败 → 降级为纯 Playbook 模式。
-2. **并发 LLM 调用**（问题 3）：条款级 `asyncio.gather` + 信号量限流 + per-call timeout（30s）；RAG 引用检索改批量并发。
-3. **stuck review 回收**（问题 4）：lifespan `_recover_stuck_reviews`（超时 30min → failed）；resume 端点条件 UPDATE 乐观锁。
-4. **legal 角色播种**（问题 5.3）：在 `_seed_roles` 中增加 legal 角色，或改 `require_roles` 为 `admin+superuser`。
-5. **引用校验收紧**（问题 7）：子串放行 ≥10 字；RAG 补充引用加 score floor ≥0.5。
+### 问题 12（提示・安全）：`RemoteAPIRerank` 的 `api_key` 在异常日志中可能泄露
 
-**P2（持续偿还）**
+- **位置**：`ragrerankers.py` `get_reranker()` L101
+- **机理**：当 siliconflow 配置不完整时，日志打印 `api_url=%r, api_key_set=%s`，这里只打印了 `bool(api_key)` 而非 key 本身——**这点做得好**。但 `RemoteAPIRerank` 的 Pydantic 模型中 `api_key` 是普通字符串字段，如果该对象被意外 `repr()` 或序列化到日志/错误报告，key 会明文泄露。
+- **修复**：给 `api_key` 字段加 `Field(repr=False)` 或在 `__repr__` 中遮盖。
 
-9. **ORM ondelete 对齐**（问题 8）：模型声明补 `ondelete="SET NULL"`。
-10. **Extractor 伪正则**（问题 10）：`"自.*起至"` 改用 `re.search` 或改为普通关键词。
-11. **死代码清理**（问题 6）：`compare_template` 函数体改 raise NotImplementedError。
+### 问题 13（提示・架构）：`compare_template` 函数体仍保留
 
+- **位置**：`complianceruntime.py` `compare_template()`；`should_compare()` 恒返回 `"skip"`
+- **建议**：函数体开头加 `raise NotImplementedError`。
+
+
+### 问题 14（一般・质量）：RAGAS 脚本的 monkey-patch 是脆弱兼容层，需固化版本
+**位置**：`scripts/eval_ragas.py::_patch_langchain_community`（注入空 `ChatVertexAI` 模块绕过 ragas 0.2.x 与 langchain-community 0.4.x 冲突）
+
+**问题**：patch 绕过方式在依赖升级后会静默失效（评估结果错误而非报错）。文档已说明，但建议**用 uv 锁定 ragas/langchain 版本组合**（`pyproject.toml` 已加依赖，确认加 `constraint`）并在 eval 入口做版本断言。
+
+### 问题 15（一般・流程）：评测已落地但未接 CI/回归门禁
+**位置**：`scripts/eval_ragas.py`（CLI 可跑）+ `docs/ragas_evaluation.md`
+
+**问题**：119 样本、双场景的评测目前是**手工运行**。既然基线数字已产出，下一步自然是接 CI（或至少 cron）：每次检索/生成逻辑改动后自动跑评测，分数回退即失败——否则"有评测"和"每轮改动都跑评测"之间还有距离。
+
+**建议**：CI 步骤：`python scripts/eval_ragas.py rag --metrics faithfulness,answer_relevancy,context_recall,context_precision` + 与基线对比（阈值如 faithfulness < 0.6 即红）。
+
+### 问题 16（一般・工程）：eval 结果 CSV 提交入库，建议只留基线快照
+**位置**：`scripts/eval_results_labor_rag.csv`（624 行）+ `eval_results_labor_k10_rag.csv`（663 行）
+
+**问题**：结果 CSV 含 `retrieved_contexts` 字段（119 个问题的完整检索上下文），文件较大且每次重跑都会变。可接受作为"基线快照"（本轮性质），但**不应成为持续提交物**——建议 gitignore 掉 `eval_results_*.csv`，只保留一份基线快照 + 在文档中记录基线数字（已有）。
