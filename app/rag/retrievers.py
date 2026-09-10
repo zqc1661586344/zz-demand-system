@@ -417,17 +417,18 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
 
 
 # ---------------------------------------------------------------------------
-# Optional cross-encoder reranker
+# Optional cross-encoder reranker (implementation lives in app.rag.rerankers)
 # ---------------------------------------------------------------------------
+
+
 def _maybe_rerank(query: str, docs: list[Document]) -> list[Document] | None:
-    """如果重新排序器已启用且依赖关系可用，则对文档进行重新排序。
+    """如果重排器已启用且依赖关系可用，则对文档进行重新排序。
 
     返回重新排序后的前N个文档，或者当重新排序器被禁用或不可用时返回 None。
     """
-    if not settings.rag_rerank_enabled:
-        return None
+    from app.rag.rerankers import get_reranker
 
-    reranker = _build_reranker()
+    reranker = get_reranker()
     if reranker is None:
         return None
 
@@ -437,38 +438,3 @@ def _maybe_rerank(query: str, docs: list[Document]) -> list[Document] | None:
     except Exception as exc:  # noqa: BLE001 — broad catch is intentional: fall back gracefully
         logger.warning(f"reranker failed, falling back to unranked results: {exc}")
         return None
-
-
-_built_reranker = None
-_reranker_lock = threading.Lock()
-
-
-def _build_reranker():
-    """延迟构建并缓存跨编码器压缩器（线程安全）。"""
-    global _built_reranker
-    if _built_reranker is not None:
-        return _built_reranker if _built_reranker is not False else None
-
-    with _reranker_lock:
-        # double-check
-        if _built_reranker is not None:
-            return _built_reranker if _built_reranker is not False else None
-
-        try:
-            from langchain_classic.retrievers.document_compressors import CrossEncoderReranker
-            from langchain_community.cross_encoders import HuggingFaceCrossEncoder
-
-            model = HuggingFaceCrossEncoder(model_name=settings.rag_rerank_model)
-            _built_reranker = CrossEncoderReranker(model=model, top_n=settings.rag_rerank_top_n)
-            logger.info(
-                f"reranker loaded: {settings.rag_rerank_model} (top_n={settings.rag_rerank_top_n})"
-            )
-            return _built_reranker
-        except ImportError:
-            logger.error("transformers/torch not installed — reranker unavailable")
-            _built_reranker = False  # sentinel: don't retry every call
-            return None
-        except Exception as exc:
-            logger.error("failed to load reranker model: %s", exc)
-            _built_reranker = False
-            return None

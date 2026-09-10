@@ -191,6 +191,22 @@ def _load_json(path: Path) -> list[Document]:
     return docs
 
 
+def _build_search_text(chunk: Document) -> str:
+    """构建用于 PG tsvector 稀疏检索的分词串。
+
+    在 page_content 分词的基础上，额外注入法规领域关键 metadata 字段，
+    让稀疏检索能精确命中"第八十二条"、"劳动合同法"等法条关键词。
+    """
+    meta_extras = []
+    meta = chunk.metadata or {}
+    for key in ("regulation_title", "article_number", "chapter", "regulation_type"):
+        val = meta.get(key)
+        if val:
+            meta_extras.append(str(val))
+    full_text = chunk.page_content + " " + " ".join(meta_extras)
+    return " ".join(_chinese_tokenizer(full_text))
+
+
 def process_document(doc_id: str) -> None:
     """单个文档索引完整处理流程：
 
@@ -268,7 +284,7 @@ def process_document(doc_id: str) -> None:
                 chunk_index=i,
                 content=chunk.page_content,
                 # jieba 分词空格串：供 PG tsvector 稀疏检索（to_tsvector('simple', ...)）
-                search_text=" ".join(_chinese_tokenizer(chunk.page_content)),
+                search_text=_build_search_text(chunk),
                 page_number=chunk.metadata.get("page"),
                 meta_json=json.dumps(chunk.metadata, ensure_ascii=False),
             )

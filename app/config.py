@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     rag_search_type: Literal["similarity", "mmr", "hybrid"] = "hybrid"
 
     # Hybrid RAG 稠密向量 vs 稀疏关键词权重（0=纯BM25, 1=纯向量）
-    rag_hybrid_alpha: float = 0.5
+    rag_hybrid_alpha: float = 0.3
 
     # 稀疏检索后端：bm25_memory（进程内 BM25，全量载入内存）/ pg_tsvector（PG 原生 tsvector + ts_rank + GIN，增量、零内存驻留）。仅当 database_url 指向 PostgreSQL 时才可用 pg_tsvector；SQLite 环境自动回退 bm25_memory。
     rag_sparse_backend: Literal["bm25_memory", "pg_tsvector"] = "pg_tsvector"
@@ -88,10 +88,15 @@ class Settings(BaseSettings):
     # 稀疏检索（pg_tsvector 后端）的 ts_rank 下限：低于此值的"命中"视为弱命中，在 SQL WHERE 用归一化 ts_rank(..., 1) 直接过滤掉，防止仅靠个别泛词共现的无关 chunk 混入 RRF。阈值作用于归一化尺度（与 SELECT 透出的 r / hybrid 一致），仅在 pg_tsvector 后端生效；bm25_memory 回退不加下限。
     rag_sparse_min_rank: float = 0.1
 
-    # 是否启用 bge-reranker 交叉编码器重排（需 transformers + torch）
-    rag_rerank_enabled: bool = False
-    # 重排器模型名
+    # Rerank 交叉编码器重排：总开关。关闭则完全跳过 rerank。
+    rag_rerank_enabled: bool = True
+    # provider = local（本地 HuggingFace 模型，需 transformers+torch）/ siliconflow（硅基流动 /v1/rerank 远端 API）
+    rag_rerank_provider: Literal["local", "siliconflow"] = "siliconflow"
+    # 重排器模型名（local 时是 HuggingFace 模型路径，siliconflow 时是硅基模型 ID）
     rag_rerank_model: str = "BAAI/bge-reranker-v2-m3"
+    # 远端 Rerank API 配置（仅当 provider=siliconflow 时生效）。留空则复用 LLM_API_BASE + "/rerank" 和 LLM_API_KEY。
+    rag_rerank_api_url: str = ""
+    rag_rerank_api_key: str = ""
     # 重排后保留的 top_n 结果
     rag_rerank_top_n: int = 5
 
