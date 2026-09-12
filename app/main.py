@@ -2,7 +2,7 @@
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy.orm import Session
@@ -65,7 +65,38 @@ async def lifespan(app: FastAPI):
     _recover_stuck_documents()
     # 恢复因异常退出而卡在中间态的合规审查（>30min 超时置 failed）
     _recover_stuck_reviews()
+    # 启动时 probe 一次 LLM/Embedding provider，结果缓存到 app.state。
+    # readiness 不再实时调用 provider（耗 token + 慢 + 抢业务资源）。
+    app.state.health_probes = _probe_providers()
     yield
+
+
+def _probe_providers() -> dict:
+    """启动时对 LLM / Embedding 做一次可达性探测，结果返回给调用方缓存。
+
+    不探测 DB/PGVector —— 这两个在 readiness 里保持实时 probe（SELECT 1 cheap 且基础设施可能随时挂）。
+    """
+    probes: dict = {}
+
+    try:
+        from app.rag.llms import get_llm
+
+        llm = get_llm()
+        llm.invoke("ping")
+        probes["llm"] = "ok"
+    except Exception as e:
+        probes["llm"] = f"error: {type(e).__name__}: {str(e)[:120]}"
+
+    try:
+        from app.rag.embeddings import get_embedding_model
+
+        emb = get_embedding_model()
+        emb.embed_query("ping")
+        probes["embedding"] = "ok"
+    except Exception as e:
+        probes["embedding"] = f"error: {type(e).__name__}: {str(e)[:120]}"
+
+    return probes
 
 
 def _recover_stuck_documents() -> None:
@@ -200,14 +231,20 @@ def liveness():
 
 
 @app.get("/api/health/ready")
-def readiness():
-    """就绪检查 — DB / PGVector / LLM / Embedding 全部可达才返回 200。"""
+def readiness(request: Request):
+    """就绪检查 — DB / PGVector 实时 probe；LLM / Embedding 读启动时缓存。
+
+    LLM/Embedding 改为读缓存是因为：
+    - provider 调用慢（硅基远端 1-3s），readiness 若被频繁调用（k8s probe / 健康检查脚本）会持续抢业务资源
+    - 每次 invoke/embed 消耗 token，纯健康检查不应产生费用
+    运维需要确认 provider 真活时，可用 /api/health/refresh 手动触发一次重新 probe。
+    """
     from sqlalchemy import text
 
     deps = {}
     all_healthy = True
 
-    # 1. Database
+    # 1. Database（实时 probe — cheap SELECT 1，基础设施可能随时挂）
     try:
         db = SessionLocal()
         db.execute(text("SELECT 1"))
@@ -217,44 +254,41 @@ def readiness():
         deps["database"] = f"error: {e}"
         all_healthy = False
 
-    # 2. PGVector 向量库
+    # 2. PGVector 向量库（实时 probe — 同上）
     try:
-        from app.rag.vector_store import _maintenance_engine
+        from app.rag._pgvector_base import maintenance_engine
 
-        with _maintenance_engine().connect() as conn:
+        with maintenance_engine().connect() as conn:
             conn.execute(text("SELECT 1"))
         deps["vector_store"] = "ok"
     except Exception as e:
         deps["vector_store"] = f"error: {e}"
         all_healthy = False
 
-    # 3. LLM 可达性 probe
-    try:
-        from app.rag.llms import get_llm
-
-        llm = get_llm()
-        llm.invoke("ping")
-        deps["llm"] = "ok"
-    except Exception as e:
-        deps["llm"] = f"error: {type(e).__name__}: {str(e)[:120]}"
-        all_healthy = False
-
-    # 4. Embedding 可达性 probe
-    try:
-        from app.rag.embeddings import get_embedding_model
-
-        emb = get_embedding_model()
-        emb.embed_query("ping")
-        deps["embedding"] = "ok"
-    except Exception as e:
-        deps["embedding"] = f"error: {type(e).__name__}: {str(e)[:120]}"
-        all_healthy = False
+    # 3-4. LLM / Embedding（读启动缓存；provider 不可达在启动时就会被记录）
+    cached = getattr(request.app.state, "health_probes", {})
+    for key in ("llm", "embedding"):
+        value = cached.get(key, "error: probe not yet run (legacy instance)")
+        deps[key] = value
+        if value != "ok":
+            all_healthy = False
 
     status_code = 200 if all_healthy else 503
     return JSONResponse(
         status_code=status_code,
         content={"status": "healthy" if all_healthy else "unhealthy", "dependencies": deps},
     )
+
+
+@app.post("/api/health/refresh")
+def refresh_probes(request: Request):
+    """手动触发一次 LLM / Embedding provider 可达性探测，刷新 app.state 缓存。
+
+    运维场景用：启动时 provider 瞬时不可用导致缓存了 error，恢复后可手动调此 endpoint 更新。
+    """
+    new_probes = _probe_providers()
+    request.app.state.health_probes = new_probes
+    return {"status": "refreshed", "probes": new_probes}
 
 
 @app.get("/")

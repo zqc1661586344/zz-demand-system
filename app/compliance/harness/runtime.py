@@ -704,7 +704,14 @@ class ComplianceHarness:
         return hints
 
     def compare_template(self, state: dict) -> dict:
-        """企业模板比对：复用 Playbook standard_position 做偏离检测 + 建议补全 + 红线升级。"""
+        """企业模板比对：复用 Playbook standard_position 做偏离检测 + 建议补全 + 红线升级。
+
+        注：当前 should_compare() 恒返回 "skip"，此分支不会被触发。
+        函数体在模板比对功能开启时再启用。
+        """
+        raise NotImplementedError(
+            "Template comparison not enabled — should_compare() returns 'skip'"
+        )
         guarded = self._guard_failed(state)
         if guarded is not None:
             return guarded

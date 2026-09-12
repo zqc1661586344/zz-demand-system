@@ -125,18 +125,9 @@ async def upload_document(
     )
     logger.info("document created in db, doc name: %s, doc id: %s", file.filename, doc.id)
 
-    # 通过 Celery 异步处理文档（生产环境）
-    if settings.celery_broker_url and settings.use_celery_task:
-        from app.rag.tasks import process_document_task
+    from app.services.rag_service import enqueue_process
 
-        logger.info("process document task use celery")
-        process_document_task.delay(doc.id)
-    else:
-        # 无 Celery 时回退 BackgroundTasks（开发模式）—— 使用 FastAPI 注入的实例
-        from app.rag.pipeline import process_document
-
-        logger.info("process document task use background_tasks")
-        background_tasks.add_task(process_document, doc.id)
+    enqueue_process(doc.id, background_tasks=background_tasks)
 
     return DocumentUploadResponse(id=doc.id, filename=stored_name, status="pending")
 
@@ -212,15 +203,9 @@ def reprocess_document(
         raise HTTPException(status_code=403, detail="Permission denied")
 
     doc = update_document_status(db, doc_id, "pending", error_message=None)
-    if settings.celery_broker_url and settings.use_celery_task:
-        from app.rag.tasks import process_document_task
 
-        logger.info("reprocess document task use celery")
-        process_document_task.delay(doc_id)
-    else:
-        from app.rag.pipeline import process_document
+    from app.services.rag_service import enqueue_process
 
-        logger.info("reprocess document task use background_tasks")
+    enqueue_process(doc_id, background_tasks=background_tasks)
 
-        background_tasks.add_task(process_document, doc_id)
     return ReprocessResponse(id=doc_id, status="pending")

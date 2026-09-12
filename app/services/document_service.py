@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.config import settings
 from app.models.document import Document
-from app.rag.vector_store import delete_documents_from_store
+from app.services.rag_service import delete_document_chunks, notify_data_changed
 
 
 def create_document(
@@ -54,7 +54,7 @@ def delete_document(db: Session, doc_id: str) -> bool:
     visibility = doc.visibility
 
     # Remove from vector store first (PGVector — by document_id metadata)
-    delete_documents_from_store(doc_id)
+    delete_document_chunks(doc_id)
 
     # 删除 DocumentChunk 表中的记录（使用传入的 db 会话）
     from app.models.document import DocumentChunk
@@ -64,9 +64,7 @@ def delete_document(db: Session, doc_id: str) -> bool:
 
     # 通知所有 worker 数据已变更（上传者 + __all__，共享文档额外波及所有本进程已知用户），
     # 各 worker 在下次查询时按版本号懒重建，无需在此同步全量重建。
-    from app.rag.retrievers import mark_bm25_data_changed
-
-    mark_bm25_data_changed(owner_id, shared=(visibility == "shared"))
+    notify_data_changed(owner_id, shared=(visibility == "shared"))
 
     # Remove file from disk
     if doc.file_path and os.path.exists(doc.file_path):

@@ -1,26 +1,28 @@
-"""PGVector vector store wrapper — 单 collection 承载全部文档（pgvector 替代 Chroma）。
+"""PGVector vector store wrapper — 业务文档 collection。
 
-对外接口与 Chroma 版保持一致，调用方（pipeline / retrievers / chain / document_service）
-无需改动：get_vector_store / add_documents_to_store / delete_documents_from_store /
-get_retriever / similarity_search / mmr_search / similarity_search_with_relevance / _user_where。
+对外接口与 Chroma 版保持一致，调用方（pipeline / retrievers / chain / document_service /
+main）无需改动。底层基础设施（engine / HNSW 索引 / store 工厂 / 删除 helper）统一抽取到
+app.rag._pgvector_base，本文件只保留业务语义层：
+  - collection = settings.vector_collection_name（"documents"）
+  - metadata key = document_id（删除时）
+  - 过滤逻辑 = _user_where（用户权限）
 """
 
-from functools import lru_cache
-from sqlalchemy import create_engine, text
 from langchain_core.documents import Document
 from langchain_core.vectorstores import VectorStoreRetriever
-from langchain_postgres.vectorstores import DistanceStrategy, PGVector
+
 from app.config import settings
 from app.logging_config import get_logger
-from app.rag.embeddings import get_embedding_model
+from app.rag._pgvector_base import (
+    delete_by_metadata,
+    ensure_hnsw_index,
+    make_vector_store,
+)
 
 logger = get_logger(__name__)
 
-# bge-m3 向量维度（PGVector 必须固定维度，否则 embedding 列无固定长度、无法建 HNSW 索引）
-EMBEDDING_DIM = 1024
-
-# HNSW 索引是否已确保创建（模块级标志，避免每次 add_documents 都执行 CREATE INDEX）
-_hnsw_index_ensured = False
+_COLLECTION = settings.vector_collection_name
+_METADATA_KEY_ID = "document_id"
 
 
 def _user_where(user_id: str | None) -> dict | None:
@@ -30,49 +32,9 @@ def _user_where(user_id: str | None) -> dict | None:
     return {"$or": [{"uploaded_by": {"$eq": user_id}}, {"visibility": {"$eq": "shared"}}]}
 
 
-@lru_cache
-def _maintenance_engine():
-    """维护用 SQLAlchemy engine（psycopg3），用于按 metadata 删除向量与建 HNSW 索引。"""
-    return create_engine(
-        settings.vector_store_url,
-        pool_size=settings.db_pool_size,
-        max_overflow=settings.db_max_overflow,
-        pool_pre_ping=settings.db_pool_pre_ping,
-        pool_recycle=settings.db_pool_recycle,
-    )
-
-
-def _ensure_hnsw_index() -> None:
-    """幂等地为 embedding 建 HNSW（cosine）索引；无索引时向量检索退化为全表扫描。使用模块级标志避免每次 add_documents 都执行 CREATE INDEX。"""
-    global _hnsw_index_ensured
-    if _hnsw_index_ensured:
-        return
-    try:
-        with _maintenance_engine().begin() as conn:
-            conn.execute(
-                text(
-                    "CREATE INDEX IF NOT EXISTS idx_documents_hnsw "
-                    "ON langchain_pg_embedding USING hnsw (embedding vector_cosine_ops)"
-                )
-            )
-            logger.info("HNSW index ensured on langchain_pg_embedding")
-            _hnsw_index_ensured = True
-    except Exception as e:  # noqa: BLE001 — 索引缺失只影响性能，不应阻断写入
-        logger.warning("failed to ensure HNSW index: %s", e)
-
-
-@lru_cache
-def get_vector_store() -> PGVector:
-    """返回 pgvector 向量库实例（单例，lru_cache 缓存，跨请求复用）。"""
-    return PGVector(
-        embeddings=get_embedding_model(),
-        collection_name=settings.vector_collection_name,
-        connection=settings.vector_store_url,
-        embedding_length=EMBEDDING_DIM,
-        distance_strategy=DistanceStrategy.COSINE,
-        use_jsonb=True,
-        create_extension=True,
-    )
+def get_vector_store():
+    """返回 pgvector 向量库实例（单例，lru_cache 按 collection_name 缓存）。"""
+    return make_vector_store(_COLLECTION)
 
 
 def add_documents_to_store(docs: list[Document]) -> list[str]:
@@ -80,35 +42,16 @@ def add_documents_to_store(docs: list[Document]) -> list[str]:
     try:
         vs = get_vector_store()
         ids = vs.add_documents(docs)
-        _ensure_hnsw_index()
+        ensure_hnsw_index()
         return ids
-    except Exception as e:
-        logger.error(f"pgvector add_documents failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.error("pgvector add_documents failed: %s", e)
         return []
 
 
 def delete_documents_from_store(doc_id: str) -> None:
-    """按 document_id 元数据删除向量。
-
-    PGVector.delete 只支持按 id 删除（不支持按 metadata 过滤），故直接对 langchain_pg_embedding 表执行 SQL（cmetadata 为 JSONB，支持 -> 取值）。向量表尚未创建（首次上传/库为空）时无需删除，直接返回。
-    """
-    try:
-        with _maintenance_engine().begin() as conn:
-            # 表还没创建（首次上传）时无需删除
-            if not conn.dialect.has_table(conn, "langchain_pg_embedding"):
-                logger.info("pgvector tables not created yet, skip delete for %s", doc_id)
-                return
-            conn.execute(
-                text(
-                    "DELETE FROM langchain_pg_embedding "
-                    "WHERE collection_id = (SELECT uuid FROM langchain_pg_collection WHERE name = :c) "
-                    "AND cmetadata->>'document_id' = :d"
-                ),
-                {"c": settings.vector_collection_name, "d": doc_id},
-            )
-            logger.info("pgvector delete: removed vectors for document %s", doc_id)
-    except Exception as e:
-        logger.warning(f"pgvector delete failed for document {doc_id}: {e}")
+    """按 document_id 元数据删除向量（幂等）。"""
+    delete_by_metadata(_COLLECTION, _METADATA_KEY_ID, doc_id)
 
 
 def get_retriever(k: int = 5, user_id: str | None = None) -> VectorStoreRetriever:
@@ -126,8 +69,8 @@ def similarity_search(query: str, k: int = 5, user_id: str | None = None) -> lis
     try:
         vs = get_vector_store()
         return vs.similarity_search(query, k=k, filter=_user_where(user_id))
-    except Exception as e:
-        logger.error(f"pgvector similarity_search failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.error("pgvector similarity_search failed: %s", e)
         return []
 
 
@@ -140,8 +83,8 @@ def mmr_search(
         return vs.max_marginal_relevance_search(
             query, k=k, fetch_k=fetch_k, lambda_mult=lambda_mult, filter=_user_where(user_id)
         )
-    except Exception as e:
-        logger.error(f"pgvector mmr_search failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.error("pgvector mmr_search failed: %s", e)
         return []
 
 
@@ -150,12 +93,13 @@ def similarity_search_with_relevance(
 ) -> list[tuple[Document, float]]:
     """相似度搜索，返回 (Document, relevance_score) 元组列表，支持按用户过滤。
 
-    PGVector 的 similarity_search_with_score 返回 cosine 距离（越小越近），这里换算为 relevance = 1 - distance，与 Chroma 版的分数语义完全一致（正常相关文档落在 [0, 1] 区间，越高越相关）。
+    PGVector 的 similarity_search_with_score 返回 cosine 距离（越小越近），换算为
+    relevance = 1 - dist，与 Chroma 版语义一致（正常相关文档落在 [0, 1] 区间）。
     """
     try:
         vs = get_vector_store()
         docs_and_dist = vs.similarity_search_with_score(query, k=k, filter=_user_where(user_id))
         return [(doc, 1.0 - dist) for doc, dist in docs_and_dist]
-    except Exception as e:
-        logger.error(f"pgvector similarity_search_with_relevance failed: {e}")
+    except Exception as e:  # noqa: BLE001
+        logger.error("pgvector similarity_search_with_relevance failed: %s", e)
         return []

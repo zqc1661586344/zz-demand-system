@@ -73,34 +73,42 @@ class Settings(BaseSettings):
     vector_store_url: str = ""
     vector_collection_name: str = "documents"
 
-    # 检索算法配置：similarity（默认）/ mmr（多样性）/ hybrid（向量+BM25+RRF融合）
+    # ===== RAG 检索配置 =====
+
+    # --- Pipeline 分片参数 ---
+    chunk_size: int = 800
+    chunk_overlap: int = 150
+
+    # --- 检索算法 ---
+    # similarity（纯向量）/ mmr（多样性）/ hybrid（向量+BM25+RRF融合）
     rag_search_type: Literal["similarity", "mmr", "hybrid"] = "hybrid"
 
-    # Hybrid RAG 稠密向量 vs 稀疏关键词权重（0=纯BM25, 1=纯向量）
+    # --- Hybrid 融合 ---
+    # 稠密 vs 稀疏权重（0=纯BM25, 1=纯向量）
     rag_hybrid_alpha: float = 0.3
+    # BM25 缓存绕过：多 worker 下每个进程独立缓存，True 则每次从 DB 读（正确但较慢）
+    rag_bm25_cache_bypass: bool = False
 
-    # 稀疏检索后端：bm25_memory（进程内 BM25，全量载入内存）/ pg_tsvector（PG 原生 tsvector + ts_rank + GIN，增量、零内存驻留）。仅当 database_url 指向 PostgreSQL 时才可用 pg_tsvector；SQLite 环境自动回退 bm25_memory。
+    # --- 稀疏检索后端 ---
+    # bm25_memory（进程内 BM25）/ pg_tsvector（PG 原生 tsvector + ts_rank + GIN）
     rag_sparse_backend: Literal["bm25_memory", "pg_tsvector"] = "pg_tsvector"
-
-    # Hybrid 检索时稠密分数的离散度下限：top-1 与 top-2 的分数差低于此值，说明检索结果没有区分度（平带），判定为 query 与文档集无关，回退 free chat。bge-m3 的分数被压缩在窄区间内，不相关的 query 也会打出 0.44~0.50 的分数，仅靠绝对阈值拦不住，需要看 spread 来识别"无命中"。
+    # ts_rank 归一化阈值：低于此值的弱命中在 SQL WHERE 层直接过滤
+    rag_sparse_min_rank: float = 0.1
+    # 稠密分数离散度下限（top1-top2）：平带说明与文档集无关 → free chat
     rag_hybrid_min_spread: float = 0.015
 
-    # 稀疏检索（pg_tsvector 后端）的 ts_rank 下限：低于此值的"命中"视为弱命中，在 SQL WHERE 用归一化 ts_rank(..., 1) 直接过滤掉，防止仅靠个别泛词共现的无关 chunk 混入 RRF。阈值作用于归一化尺度（与 SELECT 透出的 r / hybrid 一致），仅在 pg_tsvector 后端生效；bm25_memory 回退不加下限。
-    rag_sparse_min_rank: float = 0.1
-
-    # Rerank 交叉编码器重排：总开关。关闭则完全跳过 rerank。
+    # --- Rerank 交叉编码器 ---
     rag_rerank_enabled: bool = True
-    # provider = local（本地 HuggingFace 模型，需 transformers+torch）/ siliconflow（硅基流动 /v1/rerank 远端 API）
+    # local（本地 HF 模型）/ siliconflow（硅基 /v1/rerank 远端 API）
     rag_rerank_provider: Literal["local", "siliconflow"] = "siliconflow"
-    # 重排器模型名（local 时是 HuggingFace 模型路径，siliconflow 时是硅基模型 ID）
     rag_rerank_model: str = "BAAI/bge-reranker-v2-m3"
-    # 远端 Rerank API 配置（仅当 provider=siliconflow 时生效）。留空则复用 LLM_API_BASE + "/rerank" 和 LLM_API_KEY。
+    # 硅基远端配置；留空则复用 LLM_API_BASE + "/rerank" 和 LLM_API_KEY
     rag_rerank_api_url: str = ""
     rag_rerank_api_key: str = ""
-    # 重排后保留的 top_n 结果
     rag_rerank_top_n: int = 5
 
-    # RAG 相关性阈值：检索结果的相关性分数（0~1，越高越相关）低于该值时，视为"文档中找不到相关内容"，回退到大模型自由聊天。
+    # --- Free Chat 阈值 ---
+    # 稠密 top1 分数低于此值 → 判定为与文档集无关 → free chat
     rag_min_score: float = 0.4
 
     # Upload 文件上传存储路径配置
@@ -121,8 +129,6 @@ class Settings(BaseSettings):
 
     # 多进程部署配置
     web_concurrency: int = 4
-    # BM25 缓存绕过：多 worker 下每个进程独立缓存，设为 True 则每次从 DB 读取（正确但较慢）
-    rag_bm25_cache_bypass: bool = False
 
     # Celery 异步任务队列配置（为空字符串时不启用 Celery，回退 BackgroundTasks）
     celery_broker_url: str = ""
@@ -142,8 +148,6 @@ class Settings(BaseSettings):
 
     # Redis BM25 缓存版本号键的 TTL（秒）：文档变更时 mark_bm25_data_changed 会把数据版本号时间戳 setex 到 Redis（键 bm25:ts:<user>）。查询时对比本地 _bm25_ts_map（上次重建时间）与该版本号：本地产出 >= Redis 版本号，命中本地缓存；否则失效从 DB 重建。该 TTL 仅作版本号键的过期兜底（过期则退化为本地时间戳短 TTL 兜底），并非缓存本身的生命周期。仅在 celery_broker_url 配置了 Redis 且 rag_sparse_backend=bm25_memory 时生效。
     redis_bm25_cache_ttl_seconds: int = 300
-    chunk_size: int = 800
-    chunk_overlap: int = 150
 
     # ===== 文档合规审查模块（app/compliance/）=====
     # false 时不加载审查路由/模型，不影响原有功能
@@ -163,18 +167,20 @@ class Settings(BaseSettings):
     # 法规检索 Top-K
     compliance_rag_top_k: int = 10
     # Playbook 语义匹配阈值
-    compliance_playbook_semantic_threshold: float = 0.8
+    compliance_playbook_semantic_threshold: float = 0.8  # deprecated — semantic 引擎未使用
     # 引用强制校验的原文相似度阈值（逐字匹配）
-    compliance_citation_similarity_threshold: float = 0.95
+    compliance_citation_similarity_threshold: float = (
+        0.95  # deprecated — citation_verifier 硬编码 0.8/0.5
+    )
     # 人机协同开关（MVP 预留 interrupt，默认不中断）
     compliance_hitl_enabled: bool = True
     # 低风险是否自动确认
-    compliance_hitl_auto_confirm_low: bool = True
+    compliance_hitl_auto_confirm_low: bool = True  # deprecated — "低风险自动确认"逻辑未实现
     # 审查报告存放目录（运行时）与法规原始文件目录
     compliance_report_dir: str = "./data/compliance/reports"
     compliance_regulation_dir: str = "./data/compliance/regulations"
     # 法规库默认合同类型（MVP 聚焦劳动合同）
-    compliance_default_contract_type: str = "labor_contract"
+    compliance_default_contract_type: str = "labor_contract"  # deprecated — review_service 硬编码
 
     @property
     def upload_path(self) -> Path:
