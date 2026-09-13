@@ -12,7 +12,7 @@ from app.logging_config import get_logger
 from app.models.document import Document as DocModel
 from app.models.document import DocumentChunk
 from app.rag.retrievers import _chinese_tokenizer, mark_bm25_data_changed, refresh_bm25_for_user
-from app.rag.splitters import get_default_splitter
+from app.rag.splitters import get_splitter_for
 from app.rag.vector_store import add_documents_to_store, delete_documents_from_store
 from app.services.document_service import update_document_status
 
@@ -253,10 +253,14 @@ def process_document(doc_id: str) -> None:
 
         logger.info(f"loaded {len(raw_docs)} documents from file: {doc.file_path}")
 
-        # TODO: 当前切分策略单一，比如对pdf使用ocr识别，对markdown识别标题，可以根据文件类型选择不同的分块器，如 PDF 可以使用 PageContentSplitter，图片可以使用 ImageSplitter 等等
-        # 切分chunks
-        splitter = get_default_splitter()
-        chunks = splitter.split_documents(raw_docs)
+        splitter = get_splitter_for(doc.original_filename)
+        if splitter is None:
+            chunks = raw_docs
+            logger.info(
+                f"document {doc_id}: {doc.original_filename} skips splitting ({len(chunks)} chunks from loader)"
+            )
+        else:
+            chunks = splitter.split_documents(raw_docs)
 
         if not chunks:
             # 切分后没有任何 chunk（文件为空/全空白/扫描件无文本层）→ 无可检索内容，标记 failed

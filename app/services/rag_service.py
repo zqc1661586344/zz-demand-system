@@ -37,20 +37,15 @@ def enqueue_process(doc_id: str, background_tasks: BackgroundTasks | None = None
         logger.info("enqueue_process: celery delay for doc %s", doc_id)
         process_document_task.delay(doc_id)
     elif background_tasks is not None:
-        from app.rag.pipeline import process_document
-
         logger.info("enqueue_process: BackgroundTasks.add_task for doc %s", doc_id)
         background_tasks.add_task(process_document, doc_id)
     else:
-        # 无异步机制可用：同步执行（测试场景或极少见的无 BackgroundTasks 场景）
-        from app.rag.pipeline import process_document
-
         logger.info("enqueue_process: synchronous fallback for doc %s", doc_id)
         process_document(doc_id)
 
 
 def process_document(doc_id: str) -> None:
-    """同步处理一个文档（供内部调用或测试用）。"""
+    """同步处理一个文档（供 enqueue_process 的 BT/sync 分支及测试调用）。"""
     from app.rag.pipeline import process_document as _process
 
     _process(doc_id)
