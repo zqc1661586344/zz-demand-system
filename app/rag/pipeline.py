@@ -192,10 +192,15 @@ def _load_json(path: Path) -> list[Document]:
 
 
 def _build_search_text(chunk: Document) -> str:
-    """构建用于 PG tsvector 稀疏检索的分词串。
+    """构建用于 PG tsvector 稀疏检索的 jieba 分词串。
 
     在 page_content 分词的基础上，额外注入法规领域关键 metadata 字段，
     让稀疏检索能精确命中"第八十二条"、"劳动合同法"等法条关键词。
+
+    注意：JSON loader 已把 regulation_title / article_number / chapter
+    写入 page_content 头部，这里再注入相当于对这些关键词做二次加权，
+    对 BM25 稀疏检索的排序精度是正面的 —— 法规问答场景下，关键词精确
+    匹配比语义相似度更能决定 context_precision。
     """
     meta_extras = []
     meta = chunk.metadata or {}
@@ -254,13 +259,7 @@ def process_document(doc_id: str) -> None:
         logger.info(f"loaded {len(raw_docs)} documents from file: {doc.file_path}")
 
         splitter = get_splitter_for(doc.original_filename)
-        if splitter is None:
-            chunks = raw_docs
-            logger.info(
-                f"document {doc_id}: {doc.original_filename} skips splitting ({len(chunks)} chunks from loader)"
-            )
-        else:
-            chunks = splitter.split_documents(raw_docs)
+        chunks = splitter.split_documents(raw_docs)
 
         if not chunks:
             # 切分后没有任何 chunk（文件为空/全空白/扫描件无文本层）→ 无可检索内容，标记 failed

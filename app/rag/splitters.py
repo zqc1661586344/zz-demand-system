@@ -15,12 +15,13 @@ def _default_splitter() -> RecursiveCharacterTextSplitter:
     )
 
 
-def get_splitter_for(filename: str | Path):
+def get_splitter_for(filename: str | Path) -> RecursiveCharacterTextSplitter:
     """根据文件名/扩展名返回合适的切分器。
 
     - Markdown (.md/.markdown) → MarkdownHeaderTextSplitter 保留标题层级
-    - JSON (.json) → None（JSON loader 已按 article 粒度切分，不再二次切割）
-    - 其他 → RecursiveCharacterTextSplitter（默认递归切分）
+    - 其他（含 JSON） → RecursiveCharacterTextSplitter（JSON loader 已按 article
+      输出 Document，但每篇条文仍可能超过 chunk_size，需要二次切分以获得
+      更好的检索粒度）
     """
     ext = Path(str(filename)).suffix.lower()
 
@@ -40,9 +41,6 @@ def get_splitter_for(filename: str | Path):
             )
         except ImportError:
             return _default_splitter()
-
-    if ext == ".json":
-        return None
 
     return _default_splitter()
 

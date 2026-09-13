@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     rag_hybrid_min_spread: float = 0.015
 
     # --- Rerank 交叉编码器 ---
-    rag_rerank_enabled: bool = True
+    rag_rerank_enabled: bool = False
     # local（本地 HF 模型）/ siliconflow（硅基 /v1/rerank 远端 API）
     rag_rerank_provider: Literal["local", "siliconflow"] = "siliconflow"
     rag_rerank_model: str = "BAAI/bge-reranker-v2-m3"
