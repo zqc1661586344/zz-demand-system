@@ -323,7 +323,7 @@ def query_conversation_stream(
             partial_answer = "".join(full_answer_buffer)
             structured = to_structured_dict(exc, extra={"conversation_id": conv_id})
             logger.warning(
-                "streaming RAG query failed for %s (partial=%d chars): %s",
+                "streaming RAG query failed for %s (partial=%d chars): error=%s, exc=%s",
                 conv_id,
                 len(partial_answer),
                 structured.get("error_code"),
