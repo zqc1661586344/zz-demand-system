@@ -1,8 +1,6 @@
 """RAG Service — 业务语义化的 RAG 门面层。
 
-把 api/ 和 services/ 层对 rag 内部模块的穿透 import（retrievers / vector_store /
-pipeline / chain / tasks）统一收敛到本模块，对外只暴露业务语义化接口。
-compliance 侧的 import 属于技术依赖（复用 LLM provider / 文件加载器），保持不变。
+把 api/ 和 services/ 层对 rag 内部模块的穿透 import（retrievers / vector_store / pipeline / chain / tasks）统一收敛到本模块，对外只暴露业务语义化接口。compliance 侧的 import 属于技术依赖（复用 LLM provider / 文件加载器），保持不变。
 
 调用方：
   - api/conversations.py  → query / query_stream / summarize / sanitize_citations
@@ -28,8 +26,7 @@ logger = get_logger(__name__)
 def enqueue_process(doc_id: str, background_tasks: BackgroundTasks | None = None) -> None:
     """统一入口：根据 settings 决定走 Celery delay 还是 BackgroundTasks.add_task。
 
-    api/documents.py 里原来散落的 Celery/BackgroundTasks 分支判断被收敛到这里，
-    调用方只需要传 doc_id 和 background_tasks 实例。
+    api/documents.py 里原来散落的 Celery/BackgroundTasks 分支判断被收敛到这里，调用方只需要传 doc_id 和 background_tasks 实例。
     """
     if settings.celery_broker_url and settings.use_celery_task:
         from app.rag.tasks import process_document_task

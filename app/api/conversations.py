@@ -52,8 +52,7 @@ logger = get_logger(__name__)
 def _build_history(conv, db, conv_id):
     """根据之前的消息构建历史记录和摘要。返回（历史记录，摘要，总数）。
 
-    total 用 count_messages 取真实总数（旧实现用截断后的 len(<=100) 会导致
-    超长对话丢失最新上下文且摘要停更）；历史取最近 RECENT_ROUNDS*2 条（时间正序）。
+    total 用 count_messages 取真实总数（旧实现用截断后的 len(<=100) 会导致超长对话丢失最新上下文且摘要停更）；历史取最近 RECENT_ROUNDS*2 条（时间正序）。
     """
     total = count_messages(db, conv_id)
     recent_msgs = get_recent_messages(db, conv_id, limit=RECENT_ROUNDS * 2)
@@ -74,6 +73,31 @@ def _maybe_summarize(db, conv_id, total):
             update_summary(db, conv_id, new_summary)
         except Exception as e:
             logger.warning("failed to generate conversation summary: %s", e)
+
+
+def _prepare_query(conv_id: str, db: Session, current_user: User):
+    """路由层公共前置：取对话 + 鉴权 + 构建历史 + 计算 uid。
+
+    返回 (conv, history, summary, total, uid)，权限/对话不存在时直接抛 HTTPException。
+    """
+    conv = get_conversation_by_id(db, conv_id)
+    if conv is None:
+        logger.error(f"query conversation not found: {conv_id}")
+        raise HTTPException(status_code=404, detail="Conversation not found")
+
+    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
+        logger.error(f"query conversation access denied: {conv_id}")
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    history, summary, total = _build_history(conv, db, conv_id)
+    logger.debug(
+        f"query conversation history built, total={total}, summary={summary}, history={history}"
+    )
+
+    uid = None if current_user.is_superuser else str(current_user.id)
+    logger.debug(f"query conversation uid={uid}")
+
+    return conv, history, summary, total, uid
 
 
 @router.post("", response_model=ConversationResponse, status_code=201)
@@ -175,19 +199,7 @@ def query_conversation(
     current_user: User = Depends(get_current_user),  # 当前用户，依赖注入获取
 ):
     # 根据ID获取对话
-    conv = get_conversation_by_id(db, conv_id)
-    # 如果对话不存在，抛出404异常
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    # 检查用户权限：只有创建者或超级用户可以访问
-    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # Build history: summary for old rounds + recent messages
-    history, summary, total = _build_history(conv, db, conv_id)
-
-    # 构造 user_id：superuser 传 None（全量检索），普通用户传自己的 id
-    uid = None if current_user.is_superuser else str(current_user.id)
+    _, history, summary, total, uid = _prepare_query(conv_id, db, current_user)
 
     # Always run RAG against the single document collection
     free_chat = False
@@ -207,8 +219,7 @@ def query_conversation(
 
     # Save user message
     add_message(db, conv_id, role="user", content=req.query)
-    # 【根治】：存库的是纯模型回答（前端已按 free_chat 渲染提示语），历史不含提示语
-    # 非流式路径同样把 free_chat 落库，与流式 _save_messages_background 保持一致的标记。
+    # 存库的是纯模型回答（前端已按 free_chat 渲染提示语），历史不含提示语非流式路径同样把 free_chat 落库，与流式 _save_messages_background 保持一致的标记。
     add_message(
         db,
         conv_id,
@@ -227,14 +238,11 @@ def query_conversation(
 def _save_messages_background(conv_id: str, answer: str, sources: list, free_chat: bool = False):
     """后台任务：流处理完成后，使用自己的数据库会话保存助手消息。
 
-    注意：用户消息已在 `event_stream` 生成流之前【同步】写入数据库，
-    以确保下一轮追问的 `_build_history` 一定能读到上一轮的用户问题（避免竞态导致"无记忆"）。
-    这里后台只负责保存助手回答。
+    注意：用户消息已在 `event_stream` 生成流之前【同步】写入数据库，以确保下一轮追问的 `_build_history` 一定能读到上一轮的用户问题（避免竞态导致"无记忆"）。这里后台只负责保存助手回答。
     """
     db = SessionLocal()
     try:
-        # 落库前剔除越界/错乱的 `[来源 N]`/`[Source N]` 引用，保证存库与前端一致
-        # （前端流式已按 token 渲染，前端展示不再改，这里只保证存库干净）。
+        # 落库前剔除越界/错乱的 `[来源 N]`/`[Source N]` 引用，保证存库与前端一致（前端流式已按 token 渲染，前端展示不再改，这里只保证存库干净）。
         clean_answer = sanitize_citations(answer, sources or [])
         add_message(
             db,
@@ -252,100 +260,6 @@ def _save_messages_background(conv_id: str, answer: str, sources: list, free_cha
         db.close()
 
 
-@router.post("/{conv_id}/query/stream")
-@get_limiter().limit(settings.rate_limit_llm_query)
-def query_conversation_stream(
-    conv_id: str,
-    req: QueryRequest,
-    request: Request,
-    background_tasks: BackgroundTasks,
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    """流式RAG查询 — SSE标记流，然后是源数据+数据库保存。"""
-    logger.info("stream query begin...")
-
-    # 根据ID获取对话
-    conv = get_conversation_by_id(db, conv_id)
-    if conv is None:
-        logger.error(f"conversation:{conv_id} not found")
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    # 检查用户权限：只有创建者或超级用户可以访问
-    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
-        logger.error(f"access denied for user:{current_user.id} to conversation:{conv_id}")
-        raise HTTPException(status_code=403, detail="Access denied")
-
-    # TODO: 有可优化的点，如果用户连续提问，可以复用历史
-    # 构建历史：旧轮次摘要+最新消息（最近20轮）
-    history, summary, total = _build_history(conv, db, conv_id)
-
-    # superuser：None（全量可见）
-    # 普通用户： current_user.id
-    uid = None if current_user.is_superuser else str(current_user.id)
-
-    def event_stream():
-        free_chat = False
-        _partially_streamed = False
-        local_db = SessionLocal()
-        try:
-            add_message(local_db, conv_id, role="user", content=req.query)
-            local_db.commit()
-        finally:
-            local_db.close()
-
-        full_answer_buffer = []
-        try:
-            for event in query_rag_stream(
-                query=req.query, top_k=req.top_k, history=history, summary=summary, user_id=uid
-            ):
-                if event["type"] == "token":
-                    _partially_streamed = True
-                    full_answer_buffer.append(event["data"])
-                    yield f"data: {json.dumps({'token': event['data']})}\n\n"
-                elif event["type"] == "free_chat":
-                    free_chat = True
-                    yield f"data: {json.dumps({'free_chat': True})}\n\n"
-                elif event["type"] == "sources":
-                    sources = event["data"]
-                    final_answer = event.get("full_answer", "") or "".join(full_answer_buffer)
-                    background_tasks.add_task(
-                        _save_messages_background,
-                        conv_id,
-                        final_answer,
-                        sources,
-                        free_chat,
-                    )
-                    background_tasks.add_task(_maybe_summarize_background, conv_id, total)
-                    yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
-                    yield "data: [DONE]\n\n"
-        except Exception as exc:
-            partial_answer = "".join(full_answer_buffer)
-            structured = to_structured_dict(exc, extra={"conversation_id": conv_id})
-            logger.warning(
-                "streaming RAG query failed for %s (partial=%d chars): error=%s, exc=%s",
-                conv_id,
-                len(partial_answer),
-                structured.get("error_code"),
-                exc,
-            )
-            if partial_answer:
-                _save_messages_background(conv_id, partial_answer, [], True)
-            else:
-                _save_messages_background(
-                    conv_id,
-                    f"[回答生成失败: {structured.get('message', '未知错误')}]",
-                    [],
-                    True,
-                )
-            if partial_answer:
-                yield f"data: {json.dumps({'token': partial_answer, 'partial': True})}\n\n"
-            yield f"data: {json.dumps({'error': structured, 'done': True, 'partial': bool(partial_answer)})}\n\n"
-            yield "data: [DONE]\n\n"
-
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
-
-
 def _maybe_summarize_background(conv_id: str, total: int):
     """后台任务：使用自己的数据库会话触发摘要重新生成。"""
     db = SessionLocal()
@@ -356,3 +270,104 @@ def _maybe_summarize_background(conv_id: str, total: int):
         db.rollback()
     finally:
         db.close()
+
+
+def _event_stream(
+    conv_id: str,
+    query: str,
+    top_k: int,
+    history: list[dict] | None,
+    summary: str | None,
+    total: int,
+    uid: str | None,
+    background_tasks: BackgroundTasks,
+):
+    """流式 RAG SSE 生成器 —— 逐 token 推送 + sources 收尾 + 异常兜底。
+
+    用户消息在进入流之前就同步写入数据库（避免下一轮追问的 `_build_history` 竞态），assistant 消息和摘要通过 background_tasks 异步完成（不阻塞流输出）。
+    """
+    free_chat = False
+
+    # 用户消息在流式路径下，必须【同步】写入数据库，才能确保下一轮追问的 `_build_history` 一定能读到上一轮的用户问题（避免竞态导致"无记忆"）。
+    local_db = SessionLocal()
+    try:
+        add_message(local_db, conv_id, role="user", content=query)
+        local_db.commit()
+    finally:
+        local_db.close()
+
+    full_answer_buffer = []
+    try:
+        for event in query_rag_stream(
+            query=query, top_k=top_k, history=history, summary=summary, user_id=uid
+        ):
+            if event["type"] == "token":
+                full_answer_buffer.append(event["data"])
+                yield f"data: {json.dumps({'token': event['data']})}\n\n"
+            elif event["type"] == "free_chat":
+                free_chat = True
+                yield f"data: {json.dumps({'free_chat': True})}\n\n"
+            elif event["type"] == "sources":
+                sources = event["data"]
+                final_answer = event.get("full_answer", "") or "".join(full_answer_buffer)
+                background_tasks.add_task(
+                    _save_messages_background,
+                    conv_id,
+                    final_answer,
+                    sources,
+                    free_chat,
+                )
+                background_tasks.add_task(_maybe_summarize_background, conv_id, total)
+                yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
+                yield "data: [DONE]\n\n"
+    except Exception as exc:
+        # 处理异常：保存已生成的 token 并返回错误信息，兜底策略
+        partial_answer = "".join(full_answer_buffer)
+        structured = to_structured_dict(exc, extra={"conversation_id": conv_id})
+        logger.warning(
+            "streaming RAG query failed for %s (partial=%d chars): error=%s, exc=%s",
+            conv_id,
+            len(partial_answer),
+            structured.get("error_code"),
+            exc,
+        )
+        # 如果有部分生成的 token，返给前端已生成的 token，后面再补上一个错误信息
+        if partial_answer:
+            _save_messages_background(conv_id, partial_answer, [], True)
+            yield f"data: {json.dumps({'token': partial_answer, 'partial': True})}\n\n"
+        else:
+            # 保存错误信息
+            _save_messages_background(
+                conv_id,
+                f"[回答生成失败: {structured.get('message', '未知错误')}]",
+                [],
+                True,
+            )
+        # 返回错误信息
+        yield f"data: {json.dumps({'error': structured, 'done': True, 'partial': bool(partial_answer)})}\n\n"
+        yield "data: [DONE]\n\n"
+
+
+@router.post("/{conv_id}/query/stream")
+@get_limiter().limit(settings.rate_limit_llm_query)
+def query_conversation_stream(
+    conv_id: str,
+    req: QueryRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    """流式 RAG 查询 — 返回 SSE 事件流。
+
+    事件顺序：[free_chat]? → token* → sources（含 full_answer） → [DONE]
+    assistant 消息入库和摘要生成为后台异步任务，不阻塞流输出。
+    """
+    _, history, summary, total, uid = _prepare_query(conv_id, db, current_user)
+
+    return StreamingResponse(
+        _event_stream(
+            conv_id, req.query, req.top_k, history, summary, total, uid, background_tasks
+        ),
+        media_type="text/event-stream",
+    )
