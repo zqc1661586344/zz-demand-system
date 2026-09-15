@@ -31,69 +31,80 @@ from app.services.document_service import (
     update_document_status,
 )
 
+from app.services.rag_service import enqueue_process
+
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
+# MIME_TO_EXT/EXT_TO_MIME 为模块级常量，模块加载时构建一次后复用
+MIME_TO_EXT: dict[str, str] = {
+    "application/pdf": ".pdf",
+    "text/plain": ".txt",
+    "text/markdown": ".md",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
+    "text/csv": ".csv",
+    "text/html": ".html",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
+    "application/toml": ".toml",
+    "application/json": ".json",
+}
 
-# 允许的文件扩展名（默认与 pipeline.py 支持的格式一致，通过 ALLOWED_EXTENSIONS 环境变量覆盖）
-ALLOWED_EXTENSIONS = set(settings.allowed_extensions)
+EXT_TO_MIME: dict[str, str] = {v: k for k, v in MIME_TO_EXT.items()}
 
 
-@router.post("/upload", response_model=DocumentUploadResponse, status_code=201)
-@get_limiter().limit(settings.rate_limit_upload)
-async def upload_document(
-    request: Request,
-    background_tasks: BackgroundTasks,
-    file: UploadFile = File(...),
-    visibility: str = "private",
-    db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-):
-    # 验证文件类型 — 先检查 MIME 类型，若无法确定则根据扩展名判断（与 pipeline.load_document 支持格式保持一致）
-    mime_to_ext = {
-        "application/pdf": ".pdf",
-        "text/plain": ".txt",
-        "text/markdown": ".md",
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-        "text/csv": ".csv",
-        "text/html": ".html",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-        "application/toml": ".toml",
-        "application/json": ".json",
-    }
-    ext_to_mime = {v: k for k, v in mime_to_ext.items()}
+def _get_owned_doc(doc_id: str, db: Session, current_user: User) -> Document:
+    """取文档 + 鉴权。文档不存在抛 404，非 owner 且非 superuser 抛 403。"""
+    doc = get_document_by_id(db, doc_id)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="Document not found")
+    if doc.uploaded_by != current_user.id and not current_user.is_superuser:
+        raise HTTPException(status_code=403, detail="Permission denied")
+    return doc
 
-    # 优先用客户端上报的 Content-Type；命中即采用
+
+def _resolve_mime_type(file: UploadFile) -> tuple[str, str]:
+    """从 UploadFile 解析最终 (mime_type, ext)。
+
+    优先用客户端上报的 Content-Type；若无法命中则回退到文件名后缀。
+    全部不匹配时抛 HTTPException(400)。
+    """
     mime_type = file.content_type or ""
-    logger.info("file name: %s, file content_type: %s", file.filename, mime_type)
-    if mime_type not in mime_to_ext:
-        # 浏览器对 .md/.txt 等常上报 application/octet-stream，改为按文件名后缀反推真实 MIME（用 Path.suffix，确定性更强，不依赖 mimetypes 系统数据库在 Windows/macOS/Linux 上的差异）。
+    if mime_type not in MIME_TO_EXT:
+        # 浏览器对 .md/.txt 等常上报 application/octet-stream，改为按文件名后缀反推真实 MIME
         suffix = Path(file.filename or "").suffix.lower()
-        if suffix in ext_to_mime:
-            mime_type = ext_to_mime[suffix]
-        logger.info("file real content_type: %s", mime_type)
+        if suffix in EXT_TO_MIME:
+            mime_type = EXT_TO_MIME[suffix]
 
-    if mime_type not in mime_to_ext:
+    if mime_type not in MIME_TO_EXT:
         logger.error("unsupported file type: %s", mime_type)
         raise HTTPException(
             status_code=400,
             detail=f"Unsupported file type: {file.filename or mime_type}",
         )
 
-    ext = mime_to_ext[mime_type]
+    ext = MIME_TO_EXT[mime_type]
+    return mime_type, ext
 
-    # 上传文档存盘 —— 按块流式落盘，避免单个大文件整体读入内存
+
+async def _write_uploaded_file(
+    file: UploadFile,
+    ext: str,
+    max_bytes: int,
+) -> tuple[Path, int]:
+    """按 1MB 块流式写盘，超限时自行清理半截文件并抛 HTTPException(413)。
+
+    Returns:
+        (file_path, written) — 文件完整落盘后的路径和实际字节数
+    """
     os.makedirs(settings.upload_path, exist_ok=True)
     stored_name = f"{uuid.uuid4().hex}{ext}"
     file_path = settings.upload_path / stored_name
-    logger.info(f"file_path: {file_path}")
-
-    max_bytes = settings.max_upload_size_mb * 1024 * 1024
     written = 0
+
     try:
         with open(file_path, "wb") as f:
             while True:
@@ -102,34 +113,63 @@ async def upload_document(
                     break
                 written += len(chunk)
                 if written > max_bytes:
+                    logger.warning(
+                        "file too large: %s (%d bytes > %d)", file.filename, written, max_bytes
+                    )
                     raise HTTPException(
                         status_code=413,
-                        detail=f"文件超过 {settings.max_upload_size_mb}MB 大小限制",
+                        detail=f"The file exceeds the size limit of {settings.max_upload_size_mb}MB",
                     )
                 f.write(chunk)
     except HTTPException:
-        # 超限后清理已写部分，避免残留半截文件
-        if file_path.exists():
-            file_path.unlink()
+        file_path.unlink(missing_ok=True)
         raise
 
-    # 文档信息存入数据库
-    doc = create_document(
-        db=db,
-        filename=stored_name,
-        original_filename=file.filename or stored_name,
-        file_size=written,
-        mime_type=mime_type,
-        uploaded_by=current_user.id,
-        visibility=visibility,
-    )
-    logger.info("document created in db, doc name: %s, doc id: %s", file.filename, doc.id)
+    return file_path, written
 
-    from app.services.rag_service import enqueue_process
 
-    enqueue_process(doc.id, background_tasks=background_tasks)
+@router.post("/upload", response_model=DocumentUploadResponse, status_code=201)
+@get_limiter().limit(settings.rate_limit_upload)
+async def upload_document(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(...),
+    visibility: str = Query("private", pattern="^(private|public)$"),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+):
+    # 1. 校验文件类型
+    mime_type, ext = _resolve_mime_type(file)
+    logger.debug("uploading %s as %s (ext=%s)", file.filename, mime_type, ext)
 
-    return DocumentUploadResponse(id=doc.id, filename=stored_name, status="pending")
+    # 2. 流式写盘（超限自动清理半截文件并抛 413）
+    max_bytes = settings.max_upload_size_mb * 1024 * 1024
+    file_path, written = await _write_uploaded_file(file, ext, max_bytes)
+
+    # 3. 写入 DB —— 失败则回滚已落盘文件，避免孤立磁盘垃圾
+    try:
+        doc = create_document(
+            db=db,
+            filename=file_path.name,
+            original_filename=file.filename or file_path.name,
+            file_size=written,
+            mime_type=mime_type,
+            uploaded_by=current_user.id,
+            visibility=visibility,
+        )
+    except Exception:
+        logger.exception("create document failed: %s", file.filename)
+        file_path.unlink(missing_ok=True)
+        raise
+
+    # 4. 入队后台处理 —— 失败只记日志，用户可通过 reprocess 重试
+    try:
+        enqueue_process(doc.id, background_tasks=background_tasks)
+    except Exception:
+        logger.exception("failed to enqueue process for doc %s", doc.id)
+
+    logger.info("document uploaded: %s -> %s (%d bytes)", file.filename, doc.id, written)
+    return DocumentUploadResponse(id=doc.id, filename=file_path.name, status="pending")
 
 
 @router.get("", response_model=PaginatedResponse[DocumentResponse])
@@ -153,16 +193,7 @@ def get_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    doc = get_document_by_id(db, doc_id)
-    if doc is None:
-        logger.error("document not found: %s", doc_id)
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    if doc.uploaded_by != current_user.id and not current_user.is_superuser:
-        logger.error("permission denied: %s", doc_id)
-        raise HTTPException(status_code=403, detail="Permission denied")
-
-    return doc
+    return _get_owned_doc(doc_id, db, current_user)
 
 
 @router.delete("/{doc_id}")
@@ -171,15 +202,7 @@ def delete_document_route(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    doc = get_document_by_id(db, doc_id)
-    if doc is None:
-        logger.error("document not found: %s", doc_id)
-        raise HTTPException(status_code=404, detail="Document not found")
-
-    if doc.uploaded_by != current_user.id and not current_user.is_superuser:
-        logger.error("permission denied: %s", doc_id)
-        raise HTTPException(status_code=403, detail="Permission denied")
-
+    _get_owned_doc(doc_id, db, current_user)
     if not delete_document(db, doc_id):
         logger.error("failed to delete document: %s", doc_id)
         raise HTTPException(status_code=500, detail="Failed to delete document")
@@ -193,19 +216,14 @@ def reprocess_document(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    doc = get_document_by_id(db, doc_id)
-    if doc is None:
-        logger.error("document not found: %s", doc_id)
-        raise HTTPException(status_code=404, detail="Document not found")
+    _get_owned_doc(doc_id, db, current_user)
+    logger.info("reprocessing document: %s", doc_id)
 
-    if doc.uploaded_by != current_user.id and not current_user.is_superuser:
-        logger.error("permission denied: %s", doc_id)
-        raise HTTPException(status_code=403, detail="Permission denied")
+    update_document_status(db, doc_id, "pending", error_message=None)
 
-    doc = update_document_status(db, doc_id, "pending", error_message=None)
-
-    from app.services.rag_service import enqueue_process
-
-    enqueue_process(doc_id, background_tasks=background_tasks)
+    try:
+        enqueue_process(doc_id, background_tasks=background_tasks)
+    except Exception:
+        logger.exception("failed to enqueue process for reprocess doc %s", doc_id)
 
     return ReprocessResponse(id=doc_id, status="pending")

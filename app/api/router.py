@@ -16,6 +16,7 @@ api_router.include_router(documents_router)
 api_router.include_router(conversations_router)
 api_router.include_router(workflows_router)
 
+# compliance 模块依赖较多（LLM 工作流、向量库），仅在开关开启时加载
 if settings.compliance_enabled:
     from app.compliance.api.reviews import router as compliance_reviews_router
     from app.compliance.api.playbooks import router as compliance_playbooks_router

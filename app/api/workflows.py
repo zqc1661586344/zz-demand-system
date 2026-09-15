@@ -1,4 +1,12 @@
-"""Workflow API routes — definitions and instances."""
+"""Workflow API routes — definitions and instances.
+
+[预留功能] 本模块是通用工作流管理的预留 API（定义 CRUD / 实例 CRUD / 步骤查询）。
+当前项目的实际业务工作流（法规审查）由 app/compliance/workflows 下的 LangGraph 编排，
+与本模块完全独立，互不依赖。
+
+激活条件：未来若需要通用工作流平台（非审查场景），补齐 workflow_service 的业务执行逻辑、
+接入 app/workflows 下的 BaseWorkflow 框架，并在前端调用这些 endpoint 即可。
+"""
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
