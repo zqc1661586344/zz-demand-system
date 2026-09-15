@@ -40,16 +40,16 @@ from app.services.conversation_service import (
     update_summary,
 )
 
-# How many assistant+user message pairs = 1 round to keep in recent window
+# 在最近窗口中保留多少个: 助手+用户消息对 = 1轮
 RECENT_ROUNDS = 20
-SUMMARY_INTERVAL = RECENT_ROUNDS * 2  # 40 messages = every 20 rounds
+SUMMARY_INTERVAL = RECENT_ROUNDS * 2  # 40消息 = 每20轮
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
 logger = get_logger(__name__)
 
 
-def _build_history(conv, db, conv_id):
+def _build_history(conv: Conversation, db: Session, conv_id: str):
     """根据之前的消息构建历史记录和摘要。返回（历史记录，摘要，总数）。
 
     total 用 count_messages 取真实总数（旧实现用截断后的 len(<=100) 会导致超长对话丢失最新上下文且摘要停更）；历史取最近 RECENT_ROUNDS*2 条（时间正序）。
@@ -62,7 +62,7 @@ def _build_history(conv, db, conv_id):
     return history, summary, total
 
 
-def _maybe_summarize(db, conv_id, total):
+def _maybe_summarize(db: Session, conv_id: str, total: int):
     """每达到SUMMARY_INTERVAL条消息时触发摘要重新生成。"""
     if (total + 2) >= SUMMARY_INTERVAL and (total + 2) % SUMMARY_INTERVAL == 0:
         try:
@@ -72,7 +72,19 @@ def _maybe_summarize(db, conv_id, total):
             new_summary = generate_summary(history_all)
             update_summary(db, conv_id, new_summary)
         except Exception as e:
-            logger.warning("failed to generate conversation summary: %s", e)
+            logger.error("failed to generate conversation summary: %s", e)
+
+
+def _get_owned_conv(conv_id: str, db: Session, current_user: User) -> Conversation:
+    """取对话 + 鉴权。对话不存在抛 404，非 owner 且非 superuser 抛 403。"""
+    conv = get_conversation_by_id(db, conv_id)
+    if conv is None:
+        logger.error("conversation %s not found", conv_id)
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
+        logger.error("user %s not owner of conversation %s", current_user.id, conv_id)
+        raise HTTPException(status_code=403, detail="Access denied")
+    return conv
 
 
 def _prepare_query(conv_id: str, db: Session, current_user: User):
@@ -80,19 +92,13 @@ def _prepare_query(conv_id: str, db: Session, current_user: User):
 
     返回 (conv, history, summary, total, uid)，权限/对话不存在时直接抛 HTTPException。
     """
-    conv = get_conversation_by_id(db, conv_id)
-    if conv is None:
-        logger.error(f"query conversation not found: {conv_id}")
-        raise HTTPException(status_code=404, detail="Conversation not found")
-
-    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
-        logger.error(f"query conversation access denied: {conv_id}")
-        raise HTTPException(status_code=403, detail="Access denied")
-
+    conv = _get_owned_conv(conv_id, db, current_user)
     history, summary, total = _build_history(conv, db, conv_id)
     logger.debug(
         f"query conversation history built, total={total}, summary={summary}, history={history}"
     )
+    # 如果不让敏感信息泄露，考虑用下面的格式，只显示总数和历史记录长度
+    # logger.debug("query conversation history built, total=%d, history_len=%d", total, len(history))
 
     uid = None if current_user.is_superuser else str(current_user.id)
     logger.debug(f"query conversation uid={uid}")
@@ -140,11 +146,7 @@ def get_conversation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    conv = get_conversation_by_id(db, conv_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
-        raise HTTPException(status_code=403, detail="Access denied")
+    conv = _get_owned_conv(conv_id, db, current_user)
     return ConversationResponse(
         id=conv.id,
         title=conv.title,
@@ -161,11 +163,7 @@ def remove_conversation(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    conv = get_conversation_by_id(db, conv_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
-        raise HTTPException(status_code=403, detail="Access denied")
+    _get_owned_conv(conv_id, db, current_user)
     if not delete_conversation(db, conv_id):
         raise HTTPException(status_code=500, detail="Failed to delete conversation")
     return {"message": "Conversation deleted successfully"}
@@ -179,11 +177,7 @@ def list_messages(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
-    conv = get_conversation_by_id(db, conv_id)
-    if conv is None:
-        raise HTTPException(status_code=404, detail="Conversation not found")
-    if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
-        raise HTTPException(status_code=403, detail="Access denied")
+    _get_owned_conv(conv_id, db, current_user)
     total = count_messages(db, conv_id)
     items = get_messages(db, conv_id, skip=offset, limit=limit)
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
@@ -203,7 +197,6 @@ def query_conversation(
 
     # Always run RAG against the single document collection
     free_chat = False
-    error_info: dict | None = None
     try:
         result = query_rag(
             query=req.query, top_k=req.top_k, history=history, summary=summary, user_id=uid
@@ -213,8 +206,7 @@ def query_conversation(
         free_chat = bool(result.get("free_chat", False))
     except Exception as exc:
         logger.exception("RAG query failed for conversation %s, query=%r", conv_id, req.query)
-        error_info = to_structured_dict(exc, extra={"conversation_id": conv_id})
-        answer = error_info["message"]
+        answer = to_structured_dict(exc, extra={"conversation_id": conv_id})["message"]
         sources = []
 
     # Save user message
@@ -266,7 +258,8 @@ def _maybe_summarize_background(conv_id: str, total: int):
     try:
         _maybe_summarize(db, conv_id, total)
         db.commit()
-    except Exception:
+    except Exception as e:
+        logger.warning("background summarize failed for %s: %s", conv_id, e)
         db.rollback()
     finally:
         db.close()
@@ -289,12 +282,15 @@ def _event_stream(
     free_chat = False
 
     # 用户消息在流式路径下，必须【同步】写入数据库，才能确保下一轮追问的 `_build_history` 一定能读到上一轮的用户问题（避免竞态导致"无记忆"）。
-    local_db = SessionLocal()
     try:
-        add_message(local_db, conv_id, role="user", content=query)
-        local_db.commit()
-    finally:
-        local_db.close()
+        local_db = SessionLocal()
+        try:
+            add_message(local_db, conv_id, role="user", content=query)
+            local_db.commit()
+        finally:
+            local_db.close()
+    except Exception as e:
+        logger.error("failed to persist user message for %s: %s", conv_id, e)
 
     full_answer_buffer = []
     try:
