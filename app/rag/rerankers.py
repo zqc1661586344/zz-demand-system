@@ -106,6 +106,7 @@ _reranker_lock = threading.Lock()
 _reranker_fail_ts: float | None = None
 
 
+# TODO：冷却期锁竞争问题，需要优化
 def get_reranker():
     """延迟构建并缓存 CrossEncoderReranker（线程安全）。
 
@@ -185,5 +186,11 @@ def mark_reranker_failed() -> None:
     """_maybe_rerank 异常时调用，触发冷却降级而非永久禁用。"""
     global _reranker_fail_ts
     with _reranker_lock:
+        prev = _reranker_fail_ts
         _reranker_fail_ts = time.time()
-        logger.warning(f"reranker marked failed, cooling down for {_RERANK_COOLDOWN_SEC}s")
+        if prev is not None:
+            logger.warning(
+                f"reranker failure cooldown refreshed (now cooling for {_RERANK_COOLDOWN_SEC}s)"
+            )
+        else:
+            logger.warning(f"reranker marked failed, cooling down for {_RERANK_COOLDOWN_SEC}s")

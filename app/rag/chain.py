@@ -184,8 +184,7 @@ _SELF_CONTAINED_MIN_LEN = 6
 def _is_self_contained(query: str) -> bool:
     """判断问题是否明显自包含，需改写则返回 False。
 
-    自包含 = 不含指代词，且（含疑问词 或 长度足够）——覆盖"介绍/列出/比较"等
-    无疑问词的命令句与陈述句，避免每一轮都对自包含问题触发一次额外 LLM 改写。仍保留「有疑问词但带指代 → 需要改写」的判定（如"那个方案呢"）。
+    自包含 = 不含指代词，且（含疑问词 或 长度足够）——覆盖"介绍/列出/比较"等无疑问词的命令句与陈述句，避免每一轮都对自包含问题触发一次额外 LLM 改写。仍保留「有疑问词但带指代 → 需要改写」的判定（如"那个方案呢"）。
     """
     has_marker = any(m in query for m in _REFERENTIAL_MARKERS)
     if has_marker:
@@ -193,19 +192,6 @@ def _is_self_contained(query: str) -> bool:
     return (len(query.strip()) >= _SELF_CONTAINED_MIN_LEN) or any(
         w in query for w in _QUESTION_WORDS
     )
-
-
-# 改写 LLM 复用缓存（与 build_rag_chain 同模式），避免每轮改写都新建实例
-_rewrite_llm = None
-
-
-def _get_rewrite_llm():
-    global _rewrite_llm
-    if _rewrite_llm is None:
-        with _chain_lock:
-            if _rewrite_llm is None:
-                _rewrite_llm = get_llm()
-    return _rewrite_llm
 
 
 def _rewrite_query(query: str, history: list[dict] | None, summary: str | None = None) -> str:
@@ -222,7 +208,7 @@ def _rewrite_query(query: str, history: list[dict] | None, summary: str | None =
             messages.append((role, msg.get("content", "")))
         messages.append(("human", query))
         prompt = ChatPromptTemplate.from_messages(messages)
-        chain = prompt | _get_rewrite_llm() | StrOutputParser()
+        chain = prompt | get_llm() | StrOutputParser()
         rewritten = chain.invoke({})
         return (rewritten or query).strip() or query
     except Exception:
@@ -257,26 +243,27 @@ def _retrieve_relevant_docs(
         logger.info("rag search type is mmr")
         docs = mmr_search(query, k=top_k, user_id=user_id)
         if not docs:
+            logger.info("MMR returned no docs")
             return []
-        scored = similarity_search_with_relevance(query, k=len(docs), user_id=user_id)
-        if not scored:
-            # cosine 无任何命中 → MMR 的多样性结果不能作为回答依据，回退 free chat
-            logger.info("MMR returned %d docs but cosine found no matches → free chat", len(docs))
-            return []
-        if scored[0][1] < settings.rag_min_score:
+
+        # 取纯相似度的 top-1 做阈值把关：如果最佳匹配都不够相关，MMR 的多样性结果也不该用
+        scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
+        if not scored or scored[0][1] < settings.rag_min_score:
             logger.info(
-                "MMR top-1=%.3f below min_score=%.3f → reverting to free chat",
-                scored[0][1],
+                "MMR returned %d docs but top-1 similarity=%.3f below min_score=%.3f → free chat",
+                len(docs),
+                scored[0][1] if scored else 0,
                 settings.rag_min_score,
             )
             return []
+
         return docs
 
     # 普通纯向量相关性
     else:
         scored = similarity_search_with_relevance(query, k=top_k, user_id=user_id)
         logger.info(
-            "rag serach type is PGVector, query=%r scores=%s threshold=%s → retained document count=%d",
+            "rag search type is PGVector, query=%r scores=%s threshold=%s → retained document count=%d",
             query[:50],
             [round(s, 3) for _, s in scored],
             settings.rag_min_score,

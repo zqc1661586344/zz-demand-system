@@ -93,8 +93,7 @@ def similarity_search_with_relevance(
 ) -> list[tuple[Document, float]]:
     """相似度搜索，返回 (Document, relevance_score) 元组列表，支持按用户过滤。
 
-    PGVector 的 similarity_search_with_score 返回 cosine 距离（越小越近），换算为
-    relevance = 1 - dist，与 Chroma 版语义一致（正常相关文档落在 [0, 1] 区间）。
+    PGVector 的 similarity_search_with_score 返回 cosine 距离（越小越近），换算为 relevance = 1 - dist。
     """
     try:
         vs = get_vector_store()

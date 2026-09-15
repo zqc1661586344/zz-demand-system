@@ -47,7 +47,7 @@ def get_llm():
     """返回已配置的LLM实例，用于生成答案。"""
     provider = settings.llm_provider
 
-    if provider == "local" or provider == "test":
+    if provider == "test":
         logger.info("use fake model")
         return _fake_llm_runnable
 
@@ -67,7 +67,7 @@ def get_llm():
         )
 
     elif provider == "ollama":
-        logger.info(f"use local ollama model: {settings.ollama_model} ")
+        logger.info(f"use local ollama model: {settings.ollama_model}")
         from langchain_community.chat_models import ChatOllama
 
         return ChatOllama(
