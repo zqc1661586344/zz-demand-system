@@ -33,25 +33,15 @@ from app.services.document_service import (
 
 from app.services.rag_service import enqueue_process
 
+from app.rag.loaders import MIME_TO_EXT
+
 from app.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/documents", tags=["documents"])
 
-# MIME_TO_EXT/EXT_TO_MIME 为模块级常量，模块加载时构建一次后复用
-MIME_TO_EXT: dict[str, str] = {
-    "application/pdf": ".pdf",
-    "text/plain": ".txt",
-    "text/markdown": ".md",
-    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
-    "text/csv": ".csv",
-    "text/html": ".html",
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
-    "application/vnd.openxmlformats-officedocument.presentationml.presentation": ".pptx",
-    "application/toml": ".toml",
-    "application/json": ".json",
-}
+# EXT_TO_MIME 为模块级常量，模块加载时构建一次后复用
 
 EXT_TO_MIME: dict[str, str] = {v: k for k, v in MIME_TO_EXT.items()}
 
@@ -134,7 +124,7 @@ async def upload_document(
     request: Request,
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
-    visibility: str = Query("private", pattern="^(private|public)$"),
+    visibility: str = Query("private", pattern="^(private|shared)$"),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
