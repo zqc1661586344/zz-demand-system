@@ -71,3 +71,6 @@ def process_document_task(self, doc_id: str) -> dict:
         finally:
             db.close()
         return {"status": "failed", "doc_id": doc_id, "error": str(exc)}
+    except Exception as exc:  # 兜底
+        logger.error(f"unexpected error processing {doc_id}: {exc}")
+        return {"status": "failed", "doc_id": doc_id, "error": str(exc)}

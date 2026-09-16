@@ -17,7 +17,7 @@ from sqlalchemy import text
 from app.config import settings
 from app.database import engine
 from app.logging_config import get_logger
-from app.rag.retrievers import _chinese_tokenizer
+from app.rag.tokenizer import chinese_tokenizer
 
 logger = get_logger(__name__)
 
@@ -55,12 +55,13 @@ _STOP_WORDS = {
 def tokenize_query(query: str) -> str:
     """对查询做与索引一致的 jieba 分词并过滤停用词，用 " OR " 连接。
 
-    索引侧存储的是 `" ".join(_chinese_tokenizer(content))`，查询侧必须用同样的分词，
+    索引侧存储的是 `" ".join(chinese_tokenizer(content))`，查询侧必须用同样的分词，
     否则 `simple` 全文配置下中文字符会被当作一个整体、无法与已切好的词条精确匹配。
-    用 OR 连接所有有效 token，使稀疏检索变为"任意关键词命中即可召回"，再用 ts_rank 按命中数量/权重排序，
-    比 plainto_tsquery 的 AND 语义召回率高一个数量级。
+    用 OR 连接所有有效 token，使稀疏检索变为"任意关键词命中即可召回"，再用 ts_rank 按命中数量/权重排序，比 plainto_tsquery 的 AND 语义召回率高一个数量级。
     """
-    tokens = [t for t in _chinese_tokenizer(query) if t.strip().lower() not in _STOP_WORDS]
+    tokens = [t for t in chinese_tokenizer(query) if t.strip().lower() not in _STOP_WORDS]
+    if not tokens:
+        logger.debug("query=%r reduced to empty after stop-word filtering", query)
     return " OR ".join(tokens)
 
 
@@ -96,7 +97,7 @@ def ensure_fts_index() -> None:
         logger.warning(f"failed to ensure search_text column/GIN FTS index: {e}")
 
 
-def search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Document]:
+def tsvector_search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Document]:
     """PG 全文稀疏检索，等价替代内存 `get_bm25_for_user` 返回的稀疏 retriever。
 
     Args:

@@ -13,7 +13,7 @@ from langchain_core.vectorstores import VectorStoreRetriever
 
 from app.config import settings
 from app.logging_config import get_logger
-from app.rag._pgvector_base import (
+from app.rag.pgvector_base import (
     delete_by_metadata,
     ensure_hnsw_index,
     make_vector_store,

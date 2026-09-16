@@ -10,7 +10,7 @@ app.rag._pgvector_base，与业务文档 collection 共用同一张 langchain_pg
 from langchain_core.documents import Document
 
 from app.config import settings
-from app.rag._pgvector_base import (
+from app.rag.pgvector_base import (
     delete_by_metadata,
     ensure_hnsw_index,
     make_vector_store,

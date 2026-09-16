@@ -7,10 +7,6 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.logging_config import get_logger
-
-logger = get_logger(__name__)
-
 
 class RAGErrorCode:
     """错误码常量 — 按失败层级和是否可重试分组。

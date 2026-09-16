@@ -13,30 +13,36 @@ import time
 import threading
 from collections import defaultdict
 
-import jieba
+
 from langchain_core.documents import Document
 
 from app.config import settings
 from app.logging_config import get_logger
 
+from app.rag.tokenizer import chinese_tokenizer
+
 
 logger = get_logger(__name__)
-
-# 模块加载时预热，不要等到查询时才加载，否则第一次查询会非常慢
-jieba.initialize()
 
 
 # ---------------------------------------------------------------------------
 # Per-user BM25 indexes (in-memory, rebuilt from DocumentChunk on changes)
 # ---------------------------------------------------------------------------
-_bm25_map: dict[str, "BM25Retriever | None"] = {}  # key: user_id or "__all__"
-_bm25_ts_map: dict[str, float] = {}  # Redis timestamp snapshot per key
+_bm25_map: dict[str, "BM25Retriever | None"] = {}
+_bm25_ts_map: dict[str, float] = {}
 _bm25_lock = threading.RLock()
-_BM25_LRU_MAX = 500  # 进程内 LRU 缓存上限，防止内存无限增长
+
+# 进程内 LRU 缓存上限，防止内存无限增长
+_BM25_LRU_MAX = 500
+
 # 配了 Redis 但读不到数据版本号（TS 过期/从未标记）时的本地兜底 TTL（秒）：该窗口内复用最近一次重建的索引，避免 fail-closed 导致每次查询都全量重建。
 _BM25_LOCAL_TTL = 300
+
 # "加载中"标记：防止 TOCTOU 竞态下多个线程同时重建同一用户的 BM25 索引
-_LOADING: "BM25Retriever | None" = object()  # type: ignore[assignment]
+_LOADING: "BM25Retriever | None" = object()
+
+# 哨兵：不在缓存中（区别于 None=合法空索引）
+_CACHE_MISS = object()
 
 
 def _evict_lru() -> None:
@@ -57,16 +63,8 @@ def _evict_lru() -> None:
                 break
 
 
-def _chinese_tokenizer(text: str) -> list[str]:
-    """中英混合分词：对中文用jieba精确模式切词（词语级），英文按默认方式切分。
-
-    BM25Retriever默认tokenizer只做lowercase + 按非字母数字字符 split，对中文会退化成单字（unigram）匹配，查准率低。用jieba后整个词语作为一个term参与BM25的IDF/词频计算，显著提升中文相关性。
-    """
-    return [t for t in jieba.lcut(text) if t.strip()]
-
-
 def _redis_ts_key(user_key: str) -> str:
-    """Redis key for BM25 rebuild timestamp."""
+    """用于BM25重建时间戳的Redis键。"""
     return f"bm25:ts:{user_key}"
 
 
@@ -83,7 +81,7 @@ def _set_redis_ts(user_key: str, value: float) -> None:
 
 
 def _get_redis_ts(user_key: str) -> float | None:
-    """读取数据版本号；未配置 Redis / 无记录 / 已过期返回 None。"""
+    """读取数据版本号；未配置 Redis/无记录/已过期返回 None。"""
     if not settings.celery_broker_url:
         return None
     from app.cache.redis_client import get_redis_client
@@ -101,6 +99,31 @@ def _get_redis_ts(user_key: str) -> float | None:
 # ---------------------------------------------------------------------------
 # Public API — per-user BM25 refresh
 # ---------------------------------------------------------------------------
+
+
+def _rebuild_bm25_for_key(key: str, texts: list[str], metadatas: list[dict]) -> None:
+    """线程安全地重建单个用户的 BM25 索引。"""
+    from langchain_community.retrievers import BM25Retriever
+
+    with _bm25_lock:
+        if not texts:
+            _bm25_map[key] = None
+            _bm25_ts_map[key] = time.time()  # 记录空索引时间戳
+            logger.info(f"BM25 for {key}: empty (no chunks)")
+            return
+
+        _evict_lru()  # 插入前触发 LRU 淘汰
+
+        _bm25_map[key] = BM25Retriever.from_texts(
+            texts,
+            metadatas=metadatas,
+            k=max(settings.compliance_rag_top_k, settings.rag_rerank_top_n, 10),
+            preprocess_func=chinese_tokenizer,
+        )
+        _bm25_ts_map[key] = time.time()  # 记录本地时间戳
+        logger.info(f"BM25 for {key}: built from {len(texts)} chunks")
+
+
 def refresh_bm25_for_user(user_id: str) -> None:
     """从 document_chunks 读取该用户的私有 + 全部共享文档，重建 BM25。
 
@@ -184,6 +207,86 @@ def mark_bm25_data_changed(user_id: str | None = None, *, shared: bool = False) 
         _set_redis_ts(k, now)
 
 
+def _get_bm25_bypass(key: str) -> "BM25Retriever | None":
+    """旁路模式：每次都从 DB 重建，不读缓存。"""
+    if key == "__all__":
+        refresh_bm25_all()
+    else:
+        refresh_bm25_for_user(key)
+    with _bm25_lock:
+        cached = _bm25_map.get(key)
+        return cached if cached is not _LOADING else None
+
+
+def _resolve_redis_ts(key: str) -> float | None:
+    """解析该 key 的有效数据版本号（合并 __all__ 的共享文档变更）。"""
+    redis_ts = _get_redis_ts(key)
+    # 共享文档变更会更新 "__all__" 版本号；若本用户的 key 已过期（Redis_ts=None），仍须通过 __all__ 感知共享文档变化，否则该 worker 会永远读到旧共享内容。
+    if key != "__all__":
+        all_ts = _get_redis_ts("__all__")
+        if all_ts is not None:
+            redis_ts = max(redis_ts or 0.0, all_ts)
+    return redis_ts
+
+
+def _check_bm25_cache(key: str, redis_ts: float | None) -> "BM25Retriever | None | _CACHE_MISS":
+    """检查本地缓存是否有效。
+
+    返回值：
+      - BM25Retriever → 缓存命中
+      - None → 缓存命中，但值为空索引（其他线程正在加载，或已知无数据）
+      - _CACHE_MISS → 缓存缺失或过期（调用方应重建）
+    """
+    with _bm25_lock:
+        if key not in _bm25_map:
+            # 不在缓存中 → 标记为加载中，防止并发重建
+            _bm25_map[key] = _LOADING  # type: ignore[assignment]
+            return _CACHE_MISS
+
+        cached = _bm25_map[key]
+        if cached is _LOADING:
+            return None  # 其他线程正在重建，本次查询跳过
+
+        if redis_ts is None:
+            # Redis 不可用 → 纯本地缓存模式
+            if not settings.celery_broker_url:
+                return cached  # 无 Redis，完全信任本地缓存
+
+            # 配置了 Redis 但读不到版本号（TS 过期 / 该 key 从未被标记）：用本地时间戳做短 TTL 兜底，避免 fail-closed 导致每次查询都全量重建。索引只要在 _BM25_LOCAL_TTL 内重建过即可直接命中；_rebuild_bm25_for_key内部已写 _bm25_ts_map[key]=time.time()，这里直接读它判断新旧。
+            local_ts = _bm25_ts_map.get(key, 0.0)
+            if time.time() - local_ts < _BM25_LOCAL_TTL:
+                return cached
+        else:
+            # Redis 模式：本地 TS >= 数据版本号 → 缓存有效
+            local_ts = _bm25_ts_map.get(key, 0.0)
+            if local_ts >= redis_ts:
+                return cached
+
+        # 缓存过期 → 标记为加载中，让调用方重建
+        _bm25_map[key] = _LOADING  # type: ignore[assignment]
+        return _CACHE_MISS
+
+
+def _rebuild_bm25_cache(key: str, redis_ts: float | None) -> "BM25Retriever | None":
+    """锁外重建 BM25 索引（调用方确保 _bm25_map[key] 已被标记为 _LOADING）。"""
+    try:
+        if key == "__all__":
+            refresh_bm25_all()
+        else:
+            refresh_bm25_for_user(key)
+    except Exception:
+        logger.warning("BM25 rebuild failed for %s", key, exc_info=True)
+        with _bm25_lock:
+            _bm25_map.pop(key, None)
+            _bm25_ts_map.pop(key, None)
+        return None
+
+    with _bm25_lock:
+        if redis_ts is not None:
+            _bm25_ts_map[key] = redis_ts  # 对齐版本号，避免下次误判过期
+        return _bm25_map.get(key)
+
+
 def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
     """懒加载获取用户的 BM25 索引（线程安全，sentinel 防重复重建）。
 
@@ -201,87 +304,16 @@ def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
     """
     key = user_id if user_id is not None else "__all__"
 
-    # 多 worker 绕过模式：每次都从 DB 读取，不缓存（正确但较慢）
     if settings.rag_bm25_cache_bypass:
-        if key == "__all__":
-            refresh_bm25_all()
-        else:
-            refresh_bm25_for_user(key)
-        with _bm25_lock:
-            cached = _bm25_map.get(key)
-            return cached if cached is not _LOADING else None
+        return _get_bm25_bypass(key)
 
-    # ---- Redis 数据版本号检查 ----
-    redis_ts = _get_redis_ts(key)
-    # 共享文档变更会更新 "__all__" 版本号；若本用户的 key 已过期（Redis_ts=None），仍须通过 __all__ 感知共享文档变化，否则该 worker 会永远读到旧共享内容。
-    if key != "__all__":
-        all_ts = _get_redis_ts("__all__")
-        if all_ts is not None:
-            redis_ts = max(redis_ts or 0.0, all_ts)
+    redis_ts = _resolve_redis_ts(key)
 
-    with _bm25_lock:
-        if key in _bm25_map:
-            cached = _bm25_map[key]
-            if cached is _LOADING:
-                return None
-            if redis_ts is None:
-                # 未配置 Redis/Celery：纯本地缓存模式（None 空索引也是合法缓存值）
-                if not settings.celery_broker_url:
-                    return cached
-                # 配置了 Redis 但读不到版本号（TS 过期 / 该 key 从未被标记）：用本地时间戳做短 TTL 兜底，避免 fail-closed 导致每次查询都全量重建。索引只要在 _BM25_LOCAL_TTL 内重建过即可直接命中；_rebuild_bm25_for_key内部已写 _bm25_ts_map[key]=time.time()，这里直接读它判断新旧。
-                local_ts = _bm25_ts_map.get(key, 0.0)
-                if time.time() - local_ts < _BM25_LOCAL_TTL:
-                    return cached
-            else:
-                # Redis 模式：本地索引不旧于数据版本号则命中缓存（None 空索引也是合法缓存值）
-                local_ts = _bm25_ts_map.get(key, 0.0)
-                if local_ts >= redis_ts:
-                    return cached
+    cached = _check_bm25_cache(key, redis_ts)
+    if cached is not _CACHE_MISS:
+        return cached
 
-        # 缓存缺失 / 过期 → 标记为加载中（在锁内，防止竞态）
-        _bm25_map[key] = _LOADING  # type: ignore[assignment]
-
-    # ---- 锁外重建（避免锁内 IO）——懒重建不写 Redis 版本号 ----
-    try:
-        if key == "__all__":
-            refresh_bm25_all()
-        else:
-            refresh_bm25_for_user(key)
-    except Exception:
-        logger.warning("BM25 rebuild failed for %s", key, exc_info=True)
-        with _bm25_lock:
-            _bm25_map.pop(key, None)
-            _bm25_ts_map.pop(key, None)
-        return None
-
-    with _bm25_lock:
-        if redis_ts is not None:
-            # 本地构建时间对齐数据版本号，避免下次误判过期
-            _bm25_ts_map[key] = redis_ts
-        return _bm25_map.get(key)
-
-
-def _rebuild_bm25_for_key(key: str, texts: list[str], metadatas: list[dict]) -> None:
-    """线程安全地重建单个用户的 BM25 索引。"""
-    from langchain_community.retrievers import BM25Retriever
-
-    with _bm25_lock:
-        if not texts:
-            _bm25_map[key] = None
-            _bm25_ts_map[key] = time.time()  # 记录空索引时间戳
-            logger.info(f"BM25 for {key}: empty (no chunks)")
-            return
-
-        _evict_lru()  # 插入前触发 LRU 淘汰
-
-        _bm25_map[key] = BM25Retriever.from_texts(
-            texts,
-            metadatas=metadatas,
-            k=max(settings.compliance_rag_top_k, settings.rag_rerank_top_n, 10),
-            preprocess_func=_chinese_tokenizer,
-        )
-        _bm25_ts_map[key] = time.time()  # 记录本地时间戳
-        logger.info(f"BM25 for {key}: built from {len(texts)} chunks")
+    return _rebuild_bm25_cache(key, redis_ts)
 
 
 # ---------------------------------------------------------------------------
@@ -290,11 +322,12 @@ def _rebuild_bm25_for_key(key: str, texts: list[str], metadatas: list[dict]) -> 
 def _sparse_docs(query: str, top_k: int, user_id: str | None) -> list[Document]:
     """按 `rag_sparse_backend` 取回稀疏检索候选（Document 列表，可能为空）。
 
-    - `pg_tsvector`（且 database_url 为 PG）：直接走 `sparse_search.search`，无缓存、读库即最新。
+    - `pg_tsvector`（且 database_url 为 PG）：直接走 `sparse_search.tsvector_search`，无缓存、读库即最新。
+
     - `bm25_memory`，以及 PG tsvector 后端但 database_url 指向 SQLite（不可用）：回退内存 BM25。
     """
     if settings.rag_sparse_backend == "pg_tsvector":
-        from app.rag.sparse_search import is_pg_available, search as tsvector_search
+        from app.rag.sparse_search import is_pg_available, tsvector_search
 
         if is_pg_available():
             try:
@@ -305,6 +338,7 @@ def _sparse_docs(query: str, top_k: int, user_id: str | None) -> list[Document]:
     sparse = get_bm25_for_user(user_id)
     if sparse is None:
         return []
+
     try:
         return sparse.get_relevant_documents(query)[:top_k]
     except Exception as e:
@@ -338,6 +372,81 @@ def _rrf_fuse(
     return [doc for _, doc in ordered]
 
 
+def _dense_only_search(query: str, top_k: int, user_id: str | None) -> list[Document]:
+    """稀疏无命中时的纯稠密检索 + spread 判定。
+
+    如果 dense top1 分数过低或 top1/top2 分差过窄 → 返回空（free chat）。
+    """
+    from app.rag.vector_store import _user_where, get_vector_store, similarity_search_with_relevance
+
+    scored = similarity_search_with_relevance(query, k=min(top_k, 4), user_id=user_id)
+    if not scored:
+        return []
+
+    top1, spread = scored[0][1], (scored[0][1] - scored[1][1] if len(scored) >= 2 else 1.0)
+    if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
+        logger.info(
+            "dense-only top-1=%.3f spread=%.3f (min=%.3f/%.3f) → free chat",
+            top1,
+            spread,
+            settings.rag_min_score,
+            settings.rag_hybrid_min_spread,
+        )
+        return []
+
+    try:
+        vs = get_vector_store()
+        return vs.as_retriever(search_kwargs={"k": top_k, "filter": _user_where(user_id)}).invoke(
+            query
+        )[:top_k]
+    except Exception as e:
+        logger.error("hybrid_search dense-only path failed: %s", e)
+        return []
+
+
+def _hybrid_fusion(
+    query: str, top_k: int, user_id: str | None, sparse_docs: list[Document]
+) -> list[Document]:
+    """稀疏有命中时：稠密检索 → RRF 融合 → 最终分数把关 → 重排。
+
+    即使稀疏有弱命中，如果 dense top1 分数过低 → 返回空（free chat）。
+    """
+    from app.rag.vector_store import _user_where, get_vector_store, similarity_search_with_relevance
+
+    # pg_tsvector 后端的弱命中把关已在 SQL WHERE 完成（归一化 ts_rank > min_rank），返回的候选均已达标；bm25_memory 回退无 sparse_score，保持原行为（不加下限）。能走到这里说明 sparse_docs 非空（分支 1 已处理空稀疏），无需再判。
+
+    try:
+        vs = get_vector_store()
+        dense_docs = vs.as_retriever(
+            search_kwargs={"k": top_k, "filter": _user_where(user_id)}
+        ).invoke(query)
+    except Exception as e:
+        logger.error("hybrid_search dense path failed, using sparse only: %s", e)
+        dense_docs = []
+
+    docs = _rrf_fuse(dense_docs, sparse_docs, settings.rag_hybrid_alpha)
+
+    # 【相关性兜底】融合后再用 dense 侧 top1 分数判定是否需要 free chat。
+    # 只检查 "dense 是否完全空" 太松——embedding 总会返回向量，PGVector 总能搜到邻近，但 top1 的 cosine 可能极低（query 和文档集完全不相关）。这里用 rag_min_score 做最终把关：dense top1 < 阈值 → 即使 sparse 有弱命中（刚好过 min_rank），也说明 query 真的不在知识库范围内，走 free chat。
+    if docs:
+        scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
+        if not scored:
+            logger.info("hybrid path but cosine found no match at all → free chat")
+            return []
+        top1 = scored[0][1]
+        if top1 < settings.rag_min_score:
+            logger.info(
+                "hybrid path but dense top-1=%.3f < min_score=%.3f → free chat "
+                "(sparse hit too weak to justify RAG)",
+                top1,
+                settings.rag_min_score,
+            )
+            return []
+
+    reranked = _maybe_rerank(query, docs)
+    return (reranked or docs)[:top_k]
+
+
 def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Document]:
     """混合检索：PGVector稠密 + 稀疏 → RRF融合（支持 pg_tsvector 与内存 BM25 两种稀疏后端）。
 
@@ -354,78 +463,13 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
     Returns:
         排序后的 Document 列表，或空列表（free chat）。
     """
-
-    from app.rag.vector_store import _user_where, get_vector_store, similarity_search_with_relevance
-
     # 1. 取稀疏候选；无稀疏数据 → 纯稠密，做 spread 判定
     sparse_docs = _sparse_docs(query, top_k, user_id)
     if not sparse_docs:
-        scored = similarity_search_with_relevance(query, k=min(top_k, 4), user_id=user_id)
-        if not scored:
-            return []
-        top1, spread = scored[0][1], (scored[0][1] - scored[1][1] if len(scored) >= 2 else 1.0)
-        if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
-            logger.info(
-                "dense-only top-1=%.3f spread=%.3f (min=%.3f/%.3f) → free chat",
-                top1,
-                spread,
-                settings.rag_min_score,
-                settings.rag_hybrid_min_spread,
-            )
-            return []
-        try:
-            vs = get_vector_store()
-            return vs.as_retriever(
-                search_kwargs={
-                    "k": top_k,
-                    "filter": _user_where(user_id),
-                }
-            ).invoke(query)[:top_k]
-        except Exception as e:
-            logger.error(f"hybrid_search dense-only path failed: {e}")
-            return []
+        return _dense_only_search(query, top_k, user_id)
 
     # 2. 稀疏有命中 → 无需 spread，稠密+稀疏 RRF 融合。
-    # pg_tsvector 后端的弱命中把关已在 SQL WHERE 完成（归一化 ts_rank > min_rank），返回的候选均已达标；bm25_memory 回退无 sparse_score，保持原行为（不加下限）。能走到这里说明 sparse_docs 非空（分支 1 已处理空稀疏），无需再判。
-
-    try:
-        vs = get_vector_store()
-        dense_docs = vs.as_retriever(
-            search_kwargs={
-                "k": top_k,
-                "filter": _user_where(user_id),
-            }
-        ).invoke(query)
-    except Exception as e:
-        logger.error(f"hybrid_search dense path failed, using sparse only: {e}")
-        dense_docs = []
-
-    docs = _rrf_fuse(dense_docs, sparse_docs, settings.rag_hybrid_alpha)
-
-    # 【相关性兜底】融合后再用 dense 侧 top1 分数判定是否需要 free chat。
-    # 只检查 "dense 是否完全空" 太松——embedding 总会返回向量，PGVector 总能搜到邻近，
-    # 但 top1 的 cosine 可能极低（query 和文档集完全不相关）。
-    # 这里用 rag_min_score 做最终把关：dense top1 < 阈值 → 即使 sparse 有弱命中
-    # （刚好过 min_rank），也说明 query 真的不在知识库范围内，走 free chat。
-    if docs:
-        scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
-        if not scored:
-            logger.info(
-                "hybrid path but cosine found no match at all → free chat",
-            )
-            return []
-        top1 = scored[0][1]
-        if top1 < settings.rag_min_score:
-            logger.info(
-                "hybrid path but dense top-1=%.3f < min_score=%.3f → free chat "
-                "(sparse hit too weak to justify RAG)",
-                top1,
-                settings.rag_min_score,
-            )
-            return []
-
-    reranked = _maybe_rerank(query, docs)
-    return (reranked or docs)[:top_k]
+    return _hybrid_fusion(query, top_k, user_id, sparse_docs)
 
 
 # ---------------------------------------------------------------------------

@@ -16,8 +16,6 @@ from app.rag.embeddings import get_embedding_model
 
 logger = get_logger(__name__)
 
-EMBEDDING_DIM = 1024
-
 _hnsw_index_ensured = False
 
 
@@ -59,7 +57,7 @@ def make_vector_store(collection_name: str) -> PGVector:
         embeddings=get_embedding_model(),
         collection_name=collection_name,
         connection=settings.vector_store_url,
-        embedding_length=EMBEDDING_DIM,
+        embedding_length=settings.rag_embedding_dim,
         distance_strategy=DistanceStrategy.COSINE,
         use_jsonb=True,
         create_extension=True,

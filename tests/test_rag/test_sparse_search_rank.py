@@ -37,10 +37,11 @@ class TestSparseSearchRankFilter(unittest.TestCase):
 
     def test_tokenize_query_filters_stop_words(self):
         """停用词列表（的/了/哪些/什么/怎么...）不出现在 tsquery 中."""
-        from app.rag.sparse_search import tokenize_query, _STOP_WORDS, _chinese_tokenizer
+        from app.rag.sparse_search import tokenize_query, _STOP_WORDS
+        from app.rag.tokenizer import chinese_tokenizer
 
         # 先确认 jieba 会分出停用词表里的词
-        raw_tokens = _chinese_tokenizer("哪些条款是必备的")
+        raw_tokens = chinese_tokenizer("哪些条款是必备的")
         self.assertTrue(
             any(t in _STOP_WORDS for t in raw_tokens),
             f"precondition: jieba should emit at least one stop-word token, got {raw_tokens}",

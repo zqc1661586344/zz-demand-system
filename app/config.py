@@ -68,6 +68,7 @@ class Settings(BaseSettings):
     embedding_model: str = "BAAI/bge-m3"
     embedding_timeout_seconds: int = 30
     embedding_max_retries: int = 3
+    rag_embedding_dim: int = 1024
 
     # PGVector 向量库连接串（psycopg3 格式，替代 Chroma）。留空则无法使用向量库。
     vector_store_url: str = ""

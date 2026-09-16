@@ -256,7 +256,7 @@ def readiness(request: Request):
 
     # 2. PGVector 向量库（实时 probe — 同上）
     try:
-        from app.rag._pgvector_base import maintenance_engine
+        from app.rag.pgvector_base import maintenance_engine
 
         with maintenance_engine().connect() as conn:
             conn.execute(text("SELECT 1"))

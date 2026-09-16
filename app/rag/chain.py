@@ -3,6 +3,7 @@
 import re
 import threading
 
+from langchain_core.documents import Document
 from langchain_core.output_parsers import StrOutputParser
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnablePassthrough
@@ -216,6 +217,27 @@ def _rewrite_query(query: str, history: list[dict] | None, summary: str | None =
         return query
 
 
+def _mmr_search_with_threshold(query: str, top_k: int, user_id: str | None) -> list[Document]:
+    """MMR 检索 + 阈值把关；低于 min_score 返回空列表触发 free chat。"""
+    docs = mmr_search(query, k=top_k, user_id=user_id)
+    if not docs:
+        logger.info("MMR returned no docs")
+        return []
+
+    # 取纯相似度的 top-1 做阈值把关：如果最佳匹配都不够相关，MMR 的多样性结果也不该用
+    scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
+    if not scored or scored[0][1] < settings.rag_min_score:
+        logger.info(
+            "MMR returned %d docs but top-1 similarity=%.3f below min_score=%.3f → free chat",
+            len(docs),
+            scored[0][1] if scored else 0,
+            settings.rag_min_score,
+        )
+        return []
+
+    return docs
+
+
 def _retrieve_relevant_docs(
     query: str,
     top_k: int,
@@ -241,41 +263,24 @@ def _retrieve_relevant_docs(
     # 最大边际相关性——先查再按cosine分数阈值过滤，不够的走 free chat
     elif settings.rag_search_type == "mmr":
         logger.info("rag search type is mmr")
-        docs = mmr_search(query, k=top_k, user_id=user_id)
-        if not docs:
-            logger.info("MMR returned no docs")
-            return []
-
-        # 取纯相似度的 top-1 做阈值把关：如果最佳匹配都不够相关，MMR 的多样性结果也不该用
-        scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
-        if not scored or scored[0][1] < settings.rag_min_score:
-            logger.info(
-                "MMR returned %d docs but top-1 similarity=%.3f below min_score=%.3f → free chat",
-                len(docs),
-                scored[0][1] if scored else 0,
-                settings.rag_min_score,
-            )
-            return []
-
-        return docs
+        return _mmr_search_with_threshold(query, top_k, user_id)
 
     # 普通纯向量相关性
-    else:
-        scored = similarity_search_with_relevance(query, k=top_k, user_id=user_id)
-        logger.info(
-            "rag search type is PGVector, query=%r scores=%s threshold=%s → retained document count=%d",
-            query[:50],
-            [round(s, 3) for _, s in scored],
-            settings.rag_min_score,
-            sum(1 for _, s in scored if s >= settings.rag_min_score),
-        )
+    scored = similarity_search_with_relevance(query, k=top_k, user_id=user_id)
+    logger.info(
+        "rag search type is PGVector, query=%r scores=%s threshold=%s → retained document count=%d",
+        query[:50],
+        [round(s, 3) for _, s in scored],
+        settings.rag_min_score,
+        sum(1 for _, s in scored if s >= settings.rag_min_score),
+    )
 
-        return [doc for doc, score in scored if score >= settings.rag_min_score]
+    return [doc for doc, score in scored if score >= settings.rag_min_score]
 
 
 def query_rag(
     query: str,
-    top_k: int = 10,
+    top_k: int = 5,
     history: list[dict] | None = None,
     summary: str | None = None,
     user_id: str | None = None,

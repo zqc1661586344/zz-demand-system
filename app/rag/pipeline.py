@@ -11,10 +11,11 @@ from app.database import SessionLocal
 from app.logging_config import get_logger
 from app.models.document import Document as DocModel
 from app.models.document import DocumentChunk
-from app.rag.retrievers import _chinese_tokenizer, mark_bm25_data_changed, refresh_bm25_for_user
+from app.rag.retrievers import mark_bm25_data_changed, refresh_bm25_for_user
 from app.rag.splitters import get_splitter_for
 from app.rag.vector_store import add_documents_to_store, delete_documents_from_store
 from app.rag.loaders import load_multi_documents
+from app.rag.tokenizer import chinese_tokenizer
 from app.services.document_service import update_document_status
 
 logger = get_logger(__name__)
@@ -34,7 +35,7 @@ def _build_search_text(chunk: Document) -> str:
         if val:
             meta_extras.append(str(val))
     full_text = chunk.page_content + " " + " ".join(meta_extras)
-    return " ".join(_chinese_tokenizer(full_text))
+    return " ".join(chinese_tokenizer(full_text))
 
 
 def _load_doc_or_fail(db: Session, doc_id: str) -> DocModel | None:

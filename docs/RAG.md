@@ -25,9 +25,9 @@ flowchart TD
     SaveDisk["保存文件到 data/uploads/"]
     DBCreate["数据库 documents 表<br/>status = 'pending'"]
     BGTask["BackgroundTasks<br/>process_document(doc_id)"]
-    Load["加载文件<br/>PyPDFLoader / TextLoader / Docx2txtLoader"]
+    Load["加载文件<br/>load_multi_documents()<br/>LOADER_MAP 按 MIME 分发"]
     Meta["注入元数据<br/>document_id, filename,<br/>uploaded_by, visibility"]
-    Split["RecursiveCharacterTextSplitter<br/>chunk_size=800, overlap=150"]
+    Split["Strategy: get_splitter_for(filename)<br/>→ Default / MarkdownHeader /<br/>  HTMLHeader / PDF"]
     CleanOld["删除该文档在 PGVector 中的旧向量<br/>+ DELETE document_chunks 旧记录"]
     ChunkDB["写入 DocumentChunk 表<br/>含 search_text（jieba 分词空格串）"]
     Embed["get_embedding_model() → 向量化"]
@@ -77,9 +77,9 @@ flowchart TD
 
 ### 第 2 步：加载
 
-- **函数**: `load_document()`（`app/rag/pipeline.py:22`）
+- **函数**: `load_multi_documents()`（`app/rag/loaders.py:222`）
 
-根据 MIME 类型选择加载器：
+根据 MIME 类型从 `LOADER_MAP` 选择加载器：
 
 | 文件类型 | MIME | 加载器 |
 |----------|------|--------|
@@ -87,11 +87,18 @@ flowchart TD
 | TXT | `text/plain` | `TextLoader`（UTF-8） |
 | MD | `text/markdown` | `TextLoader`（UTF-8） |
 | DOCX | `application/…wordprocessingml.document` | `Docx2txtLoader` |
+| CSV | `text/csv` | `CSVLoader` |
+| HTML | `text/html` | `UnstructuredHTMLLoader` |
+| XLSX | `application/…spreadsheetml.sheet` | 自解析（`_load_xlsx`） |
+| PPTX | `application/…presentationml.presentation` | 自解析（`_load_pptx`） |
+| TOML | `application/toml` | `TomlLoader` |
+| JSON | `application/json` | `JSONLoader` |
 
 ### 第 3 步：注入元数据
 
+- **位置**: `_load_and_split()`（`app/rag/pipeline.py:68-71`），加载完成后立即注入
+
 ```python
-# pipeline.py:73-78
 d.metadata["document_id"]  = doc.id              # 按文档删除
 d.metadata["filename"]     = doc.original_filename # 溯源引用
 d.metadata["uploaded_by"]  = str(doc.uploaded_by)  # 多租户隔离
@@ -102,17 +109,18 @@ d.metadata["visibility"]   = doc.visibility         # 共享/私有
 
 ### 第 4 步：分块
 
-- **函数**: `get_default_splitter()`（`app/rag/splitters.py:8`）
+- **函数**: `get_splitter_for(filename)`（`app/rag/splitters.py:80`），返回 `SplitterStrategy` 实例
 
-```python
-RecursiveCharacterTextSplitter(
-    chunk_size=800,       # 每块最多 800 字符
-    chunk_overlap=150,    # 相邻块重叠 150 字符
-    separators=["\n\n", "\n", "。", ".", " ", ""],
-)
-```
+采用策略模式（Strategy Pattern），各文件类型走各自的切分策略，统一暴露 `split_documents(documents)` 接口：
 
-分块策略从粗到细：优先按段落（`\n\n`），再按句子（`。`、`.`），最后按词。
+| 策略类 | 适用文件 | 内部切分器 |
+|--------|---------|-----------|
+| `DefaultSplittingStrategy` | TXT / DOCX / CSV / XLSX / PPTX / TOML / JSON | `RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150, separators=["\n\n", "\n", "。", ".", " ", ""])` |
+| `MarkdownHeaderStrategy` | MD（.md） | `MarkdownHeaderTextSplitter(headers_to_split_on)` 保持标题层级 → `RecursiveCharacterTextSplitter` 二次切分 |
+| `HTMLHeaderStrategy` | HTML（.html） | `HTMLHeaderTextSplitter(headers_to_split_on)` 保持标题层级 |
+| `PDFStrategy` | PDF（.pdf） | `RecursiveCharacterTextSplitter`，但会合并同一文档对象内的多页内容 |
+
+分块策略：通用格式优先按段落（`\n\n`），再按句子（`。`、`.`），最后按词；结构化格式（MD/HTML）先按标题层级分块再二次切分，确保不割裂标题与其内容。
 
 ### 第 5 步：清理旧数据 + 索引
 
@@ -132,7 +140,7 @@ flowchart LR
 
 #### DocumentChunk 表写入
 
-- **位置**: `app/rag/pipeline.py:119-131`
+- **位置**: `_replace_chunks()`（`app/rag/pipeline.py`）
 
 ```python
 for i, chunk in enumerate(chunks):
@@ -142,7 +150,7 @@ for i, chunk in enumerate(chunks):
         chunk_index=i,
         content=chunk.page_content,
         # jieba 分词空格串：供 PG tsvector 稀疏检索（to_tsvector('simple', ...)）
-        search_text=" ".join(_chinese_tokenizer(chunk.page_content)),
+        search_text=" ".join(chinese_tokenizer(chunk.page_content)),
         page_number=chunk.metadata.get("page"),
         meta_json=json.dumps(chunk.metadata, ensure_ascii=False),
     )
@@ -166,17 +174,17 @@ db.commit()
 | 索引维护 | `_ensure_hnsw_index()` 幂等建 HNSW（`_maintenance_engine`） |
 | 嵌入模型 | 见下方「嵌入模型配置」 |
 
-> **原子性**：先写 DocumentChunk / PGVector 向量，**二者都成功后才置 `status='indexed'`**；若向量写入失败（重试无望），会先删除刚落库的该文档 chunk 再抛错，避免 failed 文档的可检索内容残留（`app/rag/pipeline.py:137-143`）。
+> **原子性**：先写 DocumentChunk / PGVector 向量，**二者都成功后才置 `status='indexed'`**；若向量写入失败（重试无望），会先删除刚落库的该文档 chunk 再抛错，避免 failed 文档的可检索内容残留（参见 `pipeline.py` 中 `_index_chunks` 的异常处理）。
 
 ### 第 6 步：同步稀疏索引（默认 pg_tsvector 增量 / BM25 缓存）
 
-- **函数**: `mark_bm25_data_changed()` + `refresh_bm25_for_user()`（`app/rag/pipeline.py:148-150`）
+- **函数**: `_refresh_bm25()`（`app/rag/pipeline.py:134`），由 `process_document` 在置 `indexed` 后调用
 - **触发时机**：文档处理完成、置 `indexed` 后立即执行
 
 ```python
 # 先广播数据版本号（Redis，使所有 worker 的相关稀疏缓存失效），
 # 再增量刷新本进程的稀疏索引。
-is_shared = getattr(doc, "visibility", "private") == "shared"
+is_shared = doc.visibility == "shared"
 mark_bm25_data_changed(str(doc.uploaded_by), shared=is_shared)
 refresh_bm25_for_user(str(doc.uploaded_by))
 ```
@@ -210,6 +218,7 @@ flowchart TD
     SimSearch["similarity_search_with_relevance(query, k, user_id)<br/>PGVector + _user_where 过滤<br/>→ top_k 文档 + 相似度分数"]
     SimFilter["score ≥ rag_min_score 过滤"]
     MMRSearch["mmr_search(query, k, user_id)<br/>PGVector + _user_where 过滤<br/>→ 多样性检索，无分数"]
+    MMRScoreCheck{"top-1 cosine<br/>≥ rag_min_score？"}
     Empty{"文档为空<br/>（未命中）"}
     FreeChat["自由聊天<br/>FREE_CHAT_PROMPT → LLM<br/>无来源文档"]
     RAGChat["RAG 聊天<br/>RAG_PROMPT + context + history → LLM"]
@@ -240,8 +249,9 @@ flowchart TD
     SimFilter --> RAGChat
 
     MMR --> MMRSearch
-    MMRSearch --> Empty
-    MMRSearch --> RAGChat
+    MMRSearch --> MMRScoreCheck
+    MMRScoreCheck -- "是" --> RAGChat
+    MMRScoreCheck -- "否" --> Empty
 
     Empty -- "是" --> FreeChat
     Empty -- "否（有文档）" --> RAGChat
@@ -296,7 +306,7 @@ else:
 
 ### 第 4 步：检索（三模式分发，均支持用户过滤）
 
-- **函数**: `_retrieve_relevant_docs()`（`app/rag/chain.py:224`）
+- **函数**: `_retrieve_relevant_docs()`（`app/rag/chain.py:241`）
 
 按 `rag_search_type` 分三种模式。所有模式都接收 `user_id` 参数并传递给 PGVector 的 `_user_where()` 过滤。
 
@@ -321,7 +331,7 @@ flowchart LR
 
 1. **PGVector 稠密检索**：`vs.as_retriever(k=top_k, filter=_user_where(user_id))` — bge-m3 + cosine 向量搜索
 2. **稀疏检索**：
-   - `pg_tsvector`（默认）：`sparse_search.search()` 查 PG `search_text`，SQL WHERE 里用归一化 `ts_rank(...,1) > rag_sparse_min_rank` **把关弱命中**（只让真命中进入融合）。
+   - `pg_tsvector`（默认）：`sparse_search.tsvector_search()` 查 PG `search_text`，SQL WHERE 里用归一化 `ts_rank(...,1) > rag_sparse_min_rank` **把关弱命中**（只让真命中进入融合）。
    - `bm25_memory`（回退）：`get_bm25_for_user(user_id)` — 从 `_bm25_map` 取该用户索引，jieba + rank_bm25。
 3. **RRF 融合**：手写 `_rrf_fuse()` — `score(d) = Σ [weight/(c + rank_i(d))]`，`c=60`，去重键 `(document_id, page_content)`，凸组合权重 `[alpha, 1-alpha]`。
 4. **可选重排**：`_maybe_rerank()` — 若 `rag_rerank_enabled=true` 且 transformers 可用，调用 bge-reranker-v2-m3 交叉编码器。
@@ -338,10 +348,11 @@ flowchart LR
 1. `similarity_search_with_relevance(query, k=top_k, user_id=user_id)` → `[(Document, score)]`
 2. 过滤 `score ≥ rag_min_score（默认 0.4）`
 
-#### 模式 C：mmr — 多样性检索
+#### 模式 C：mmr — 最大边际相关性
 
-1. `mmr_search(query, k=top_k, user_id=user_id)` — 平衡相关性与多样性
-2. 不返回分数，不设阈值，直接取结果
+1. `mmr_search(query, k=top_k, user_id=user_id)` — MMR 算法平衡相关性与多样性
+2. 再查 `similarity_search_with_relevance(query, k=1, user_id=user_id)` 取 top-1 cosine 分数
+3. `top-1 < rag_min_score（默认 0.4）` → 最佳匹配都不够相关，MMR 的多样性结果也不该用 → 回退 free chat
 
 ### 用户过滤函数
 
@@ -413,7 +424,7 @@ Human: 用户当前的问题
 |------|--------|----------|----------|------|----------|----------|
 | `hybrid`（默认） | `RAG_SEARCH_TYPE=hybrid` | 稠密向量 + 稀疏 → 手写 RRF 融合 | ✅ `_user_where()` | ✅ pg_tsvector（默认）/ BM25 回退 | ✅ | 通用最佳，兼顾语义和关键词 |
 | `similarity` | `RAG_SEARCH_TYPE=similarity` | 纯稠密向量（cosine） | ✅ `_user_where()` | ❌ | ✅ | 只依赖语义匹配 |
-| `mmr` | `RAG_SEARCH_TYPE=mmr` | 稠密向量 + MMR 多样性 | ✅ `_user_where()` | ❌ | ✅ | 需要结果多样性时 |
+| `mmr` | `RAG_SEARCH_TYPE=mmr` | 稠密向量 + MMR 多样性 + cosine 阈值把关 | ✅ `_user_where()` | ❌ | ✅ | 需要结果多样性时 |
 
 ---
 
@@ -435,7 +446,7 @@ flowchart TD
 |------|----------|----------|
 | `hybrid` | 稀疏为空 → 回退纯稠密，`top-1 < rag_min_score` **或** `spread < rag_hybrid_min_spread`；稀疏命中但稠密侧完全零相关（库空/embedding 失败） | Free Chat |
 | `similarity` | 所有文档 `score < rag_min_score` | Free Chat |
-| `mmr` | 检索结果为空，或 cosine 无任何命中 / top-1 低于 `rag_min_score` | Free Chat |
+| `mmr` | 检索结果为空，或 cosine top-1 低于 `rag_min_score` | Free Chat |
 
 ### 为什么要用离散度（spread）？
 
@@ -511,7 +522,7 @@ DocumentChunk 表（data/app.db）
 
 | 事件 | 触发函数 | 重建目标 | 方式 |
 |------|---------|----------|------|
-| **文档上传处理完毕** | `pipeline.py:119` | `refresh_bm25_for_user(uploaded_by)` | 从 DB 全量重建该用户 |
+| **文档上传处理完毕** | `_refresh_bm25()`（`pipeline.py`） | `refresh_bm25_for_user(uploaded_by)` | 从 DB 全量重建该用户 |
 | **文档删除后** | `document_service.py:68` | `refresh_bm25_for_user(owner_id)` | 从 DB 全量重建该用户 |
 | **首次查询某用户** | `get_bm25_for_user(user_id)` 发现 key 缺失 | 懒加载重建 | 从 DB 全量重建 |
 | **共享文档删除后** | `document_service.py:74-75` | 清空 `_bm25_map["__all__"]` | 删除缓存，下次 superuser 查询时懒加载 |
@@ -529,8 +540,10 @@ get_bm25_for_user(user_id | None) # 不存在时自动重建，None=superuser
 
 #### 分词器
 
+- **函数**: `chinese_tokenizer()`（`app/rag/tokenizer.py:7`）
+
 ```python
-def _chinese_tokenizer(text: str) -> list[str]:
+def chinese_tokenizer(text: str) -> list[str]:
     """jieba 精确模式，词语级切分。"""
     return [t for t in jieba.lcut(text) if t.strip()]
 ```
