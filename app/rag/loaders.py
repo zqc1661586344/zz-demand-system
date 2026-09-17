@@ -1,3 +1,8 @@
+"""
+文档加载器模块，负责加载不同格式的文档文件。
+将二进制文件转换为 LangChain 可以处理的 Document 对象，每个 Document 包含文件内容和元数据。元数据包含 source路径。可用于后续的检索和分析。
+"""
+
 import json
 from pathlib import Path
 from typing import Callable
@@ -24,6 +29,7 @@ MIME_TO_EXT: dict[str, str] = {
 }
 
 
+# TODO：需要增加处理 PDF 中类似“表格”数据的逻辑
 def _load_pdf(path: str) -> list[Document]:
     """加载 PDF 文件"""
     from langchain_community.document_loaders import PyPDFLoader
@@ -66,11 +72,16 @@ def _load_html(path: str) -> list[Document]:
 
 def _load_xlsx(path: str) -> list[Document]:
     """加载 Excel 文件"""
+    # langchain中的XLSXLoader 按照每行切分为一个 Document，粒度更细
     # from langchain_community.document_loaders import XLSXLoader
 
     import pandas as pd
 
     sheets = pd.read_excel(path, sheet_name=None)  # dict[sheet_name, DataFrame]
+
+    # 每个 sheet 都转换为一个 Document，包含 sheet 名和所有数据（CSV 格式）
+    # 每个 sheet 都有一个 metadata 字典，包含 source 文件路径
+
     return [
         Document(
             page_content=f"### Sheet: {name}\n\n{df.astype(str).to_csv(index=False)}",
@@ -86,6 +97,7 @@ def _load_pptx(path: str) -> list[Document]:
 
     from pptx import Presentation
 
+    # 每页 Slide 一个 Document，内容包含 ### Slide N 标题头 + 该页所有文本框内容的拼接。
     prs = Presentation(path)
     docs = []
     for i, slide in enumerate(prs.slides, 1):

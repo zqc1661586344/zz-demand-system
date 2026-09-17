@@ -1,4 +1,6 @@
-"""文档分块中的文本分割策略。"""
+"""文档分块中的文本分割策略。
+将过长的文本切分为多个适合嵌入模型（bge-m3 最大 8192 token）和检索粒度（chunk_size=800）的短块。
+"""
 
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -60,6 +62,7 @@ class HtmlHeaderStrategy(SplitterStrategy):
         return DefaultSplittingStrategy().split_documents(documents)
 
 
+# TODO：需要增加处理 PDF 中类似“表格”数据的逻辑，考虑表格数据的切分策略
 # PDF 切分器策略
 class TableAwarePageStrategy(SplitterStrategy):
     def split_documents(self, documents: list[Document]) -> list[Document]:
