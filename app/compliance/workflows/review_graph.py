@@ -53,7 +53,7 @@ def build_review_graph(harness: ComplianceHarness) -> StateGraph:
     g.add_edge("compare", "reflect")
 
     # reflect → (质量不达标且重试未超限 → 回 review) /
-    #            (HITL 启用且有高风险 → human_review) / (否则 → generate_report)
+    # (HITL 启用且有高风险 → human_review) / (否则 → generate_report)
     g.add_conditional_edges(
         "reflect",
         harness.should_retry,

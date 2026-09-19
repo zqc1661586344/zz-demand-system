@@ -194,25 +194,171 @@ class ComplianceHarness:
         finally:
             db.close()
 
+    def _persist_clauses(
+        self, db, review_id: str, compliance_doc_id: str, clauses: list[dict]
+    ) -> dict[str, str]:
+        """写入条款，返回 clause_number → clause_id 映射（供 risk 追溯 clause_id）。"""
+        import uuid as _uuid
+
+        # 收集现有 clause_id（用于清理重跑时的残留）
+        existing_clause_ids = {
+            r[0]
+            for r in db.query(ComplianceClause.id)
+            .filter(ComplianceClause.review_id == review_id)
+            .all()
+        }
+
+        clause_id_by_number: dict[str, str] = {}
+        for idx, c in enumerate(clauses or []):
+            clause_id = str(_uuid.uuid4())
+            c_obj = ComplianceClause(
+                id=clause_id,
+                review_id=review_id,
+                compliance_doc_id=compliance_doc_id,
+                clause_number=c.get("clause_number") or f"第{idx + 1}条",
+                clause_type=c.get("clause_type"),
+                title=c.get("title") or (c.get("content") or "")[:80],
+                content=c.get("content") or "",
+                page_number=c.get("page_number"),
+                sort_order=idx,
+            )
+            db.add(c_obj)
+            if c_obj.clause_number:
+                clause_id_by_number[c_obj.clause_number] = clause_id
+            existing_clause_ids.discard(clause_id)
+
+        # 清除重跑后不再存在的旧 clause
+        for old_id in existing_clause_ids:
+            db.query(ComplianceClause).filter(ComplianceClause.id == old_id).delete()
+
+        return clause_id_by_number
+
+    def _persist_key_info(self, db, review_id: str, compliance_doc_id: str, key_info: dict) -> None:
+        """写入关键信息（先清后写，幂等）。"""
+        import uuid as _uuid
+
+        db.query(ComplianceKeyInfo).filter(ComplianceKeyInfo.review_id == review_id).delete(
+            synchronize_session=False
+        )
+        for k, v in (key_info or {}).items():
+            if v is None or v == "":
+                continue
+            db.add(
+                ComplianceKeyInfo(
+                    id=str(_uuid.uuid4()),
+                    review_id=review_id,
+                    compliance_doc_id=compliance_doc_id,
+                    field_key=k,
+                    field_value=str(v),
+                    confidence=None,
+                    clause_id=None,
+                )
+            )
+
+    def _persist_risks(
+        self, db, review_id: str, risks: list[dict], clause_id_by_number: dict[str, str]
+    ) -> None:
+        """写入风险条目及其法规引用（先清后写）。"""
+        import uuid as _uuid
+
+        db.query(ComplianceRisk).filter(ComplianceRisk.review_id == review_id).delete(
+            synchronize_session=False
+        )
+
+        _rule_id_cache: dict[str, str | None] = {}
+        for idx, r in enumerate(risks or []):
+            # rule_id 追溯
+            playbook_id = self._resolve_playbook_id(db, r, _rule_id_cache)
+
+            # clause_id 追溯（LLM 输出可能没有 clause_id，用 clause_number 回查）
+            clause_id = r.get("clause_id")
+            if not clause_id:
+                clause_number = r.get("clause_number") or ""
+                clause_id = clause_id_by_number.get(clause_number)
+
+            risk_obj = ComplianceRisk(
+                id=r.get("id") or str(_uuid.uuid4()),
+                review_id=review_id,
+                clause_id=clause_id,
+                risk_level=r.get("risk_level", "low"),
+                risk_category=r.get("risk_category", "other"),
+                description=r.get("description") or "",
+                suggestion=r.get("suggestion"),
+                suggestion_reason=r.get("suggestion_reason"),
+                playbook_rule_id=playbook_id,
+                ai_confidence=float(r.get("ai_confidence") or 1.0),
+                sort_order=idx,
+            )
+            db.add(risk_obj)
+            db.flush()
+
+            # 写引用
+            for rf in r.get("legal_references") or []:
+                db.add(
+                    ComplianceRiskReference(
+                        id=str(_uuid.uuid4()),
+                        risk_id=risk_obj.id,
+                        ref_type=rf.get("ref_type") or "regulation",
+                        ref_name=rf.get("ref_name") or "",
+                        ref_article=rf.get("ref_article"),
+                        ref_content=rf.get("ref_content") or "",
+                        ref_source_url=rf.get("ref_source_url"),
+                        verified=bool(rf.get("verified")),
+                    )
+                )
+
+    @staticmethod
+    def _resolve_playbook_id(db, risk: dict, cache: dict[str, str | None]) -> str | None:
+        """从 risk 中提取 playbook_rule_id，按 playbook_rule_id → rule_id → rule_name 三级回退。"""
+        rule_hint = risk.get("playbook_rule_id")
+        if rule_hint:
+            return rule_hint
+
+        if risk.get("rule_id"):
+            return risk["rule_id"]
+
+        rule_name = risk.get("rule_name")
+        if rule_name:
+            if rule_name not in cache:
+                row = (
+                    db.query(CompliancePlaybook.id)
+                    .filter(CompliancePlaybook.name == rule_name)
+                    .first()
+                )
+                cache[rule_name] = row[0] if row else None
+            return cache[rule_name]
+        return None
+
+    def _persist_reports(self, db, review_id: str, report_paths: dict) -> None:
+        """写入报告文件记录。"""
+        import uuid as _uuid
+        from datetime import datetime, timezone as _tz
+
+        now = datetime.now(_tz.utc)
+        for fmt in ("html", "word", "pdf"):
+            p = report_paths.get(fmt) if report_paths else None
+            if p:
+                path_obj = Path(p)
+                size = path_obj.stat().st_size if path_obj.is_file() else None
+                db.add(
+                    ComplianceReport(
+                        id=str(_uuid.uuid4()),
+                        review_id=review_id,
+                        format=fmt,
+                        file_path=p,
+                        file_size=size,
+                        generated_at=now,
+                    )
+                )
+
     def _persist_results(
-        self,
-        *,
-        review_id: str,
-        compliance_doc_id: str,
-        clauses: list[dict],
-        key_info: dict,
-        risks: list[dict],
-        report_paths: dict,
-        risk_counts: dict,
+        self, *, review_id, compliance_doc_id, clauses, key_info, risks, report_paths, risk_counts
     ) -> None:
         """审查完成后事务化写入 clauses → key_info → risks → references → reports.
 
         同一 review 重跑时先清旧数据（CASCADE ondelete 会连带清除 risks/references）。
         任意写入失败整体回滚并置 review 为 failed，保证不会出现"半落库"。
         """
-        import uuid as _uuid
-        from datetime import datetime, timezone as _tz
-
         db = SessionLocal()
         try:
             review = db.query(ComplianceReview).filter(ComplianceReview.id == review_id).first()
@@ -220,137 +366,26 @@ class ComplianceHarness:
                 logger.warning("persist_results: review %s not found", review_id)
                 return
 
+            # 清旧报告（先于 clause 清理，避免 FK 冲突）
             db.query(ComplianceReport).filter(ComplianceReport.review_id == review_id).delete(
                 synchronize_session=False
             )
 
-            existing_clause_ids = {
-                r[0]
-                for r in db.query(ComplianceClause.id)
-                .filter(ComplianceClause.review_id == review_id)
-                .all()
-            }
+            # ① 写条款 → 返回 clause_number → clause_id 映射（供 risk 追溯）
+            clause_id_by_number = self._persist_clauses(db, review_id, compliance_doc_id, clauses)
 
-            clause_id_by_index: dict[int, str] = {}
-            clause_id_by_number: dict[str, str] = {}
-            for idx, c in enumerate(clauses or []):
-                clause_id = str(_uuid.uuid4())
-                c_obj = ComplianceClause(
-                    id=clause_id,
-                    review_id=review_id,
-                    compliance_doc_id=compliance_doc_id,
-                    clause_number=c.get("clause_number") or f"第{idx + 1}条",
-                    clause_type=c.get("clause_type"),
-                    title=c.get("title") or (c.get("content") or "")[:80],
-                    content=c.get("content") or "",
-                    page_number=c.get("page_number"),
-                    sort_order=idx,
-                )
-                db.add(c_obj)
-                clause_id_by_index[idx] = clause_id
-                if c_obj.clause_number:
-                    clause_id_by_number[c_obj.clause_number] = clause_id
-                existing_clause_ids.discard(clause_id)
-
-            for old_id in existing_clause_ids:
-                db.query(ComplianceClause).filter(ComplianceClause.id == old_id).delete()
-
-            db.query(ComplianceKeyInfo).filter(ComplianceKeyInfo.review_id == review_id).delete(
-                synchronize_session=False
-            )
-            for k, v in (key_info or {}).items():
-                if v is None or v == "":
-                    continue
-                db.add(
-                    ComplianceKeyInfo(
-                        id=str(_uuid.uuid4()),
-                        review_id=review_id,
-                        compliance_doc_id=compliance_doc_id,
-                        field_key=k,
-                        field_value=str(v),
-                        confidence=None,
-                        clause_id=None,
-                    )
-                )
+            # ② 写关键信息
+            self._persist_key_info(db, review_id, compliance_doc_id, key_info)
 
             db.flush()
 
-            db.query(ComplianceRisk).filter(ComplianceRisk.review_id == review_id).delete(
-                synchronize_session=False
-            )
+            # ③ 写风险 + 引用
+            self._persist_risks(db, review_id, risks, clause_id_by_number)
 
-            _rule_id_cache: dict[str, str | None] = {}
+            # ④ 写报告
+            self._persist_reports(db, review_id, report_paths)
 
-            for idx, r in enumerate(risks or []):
-                rule_hint = r.get("playbook_rule_id")
-                playbook_id: str | None = None
-                if rule_hint:
-                    playbook_id = rule_hint
-                elif r.get("rule_id"):
-                    playbook_id = r["rule_id"]
-                elif r.get("rule_name"):
-                    cache_key = r["rule_name"]
-                    if cache_key not in _rule_id_cache:
-                        _pb_row = (
-                            db.query(CompliancePlaybook.id)
-                            .filter(CompliancePlaybook.name == r["rule_name"])
-                            .first()
-                        )
-                        _rule_id_cache[cache_key] = _pb_row[0] if _pb_row else None
-                    playbook_id = _rule_id_cache[cache_key]
-
-                clause_id = r.get("clause_id")
-                if not clause_id:
-                    clause_number = r.get("clause_number") or ""
-                    clause_id = clause_id_by_number.get(clause_number)
-
-                risk_obj = ComplianceRisk(
-                    id=r.get("id") or str(_uuid.uuid4()),
-                    review_id=review_id,
-                    clause_id=clause_id,
-                    risk_level=r.get("risk_level", "low"),
-                    risk_category=r.get("risk_category", "other"),
-                    description=r.get("description") or "",
-                    suggestion=r.get("suggestion"),
-                    suggestion_reason=r.get("suggestion_reason"),
-                    playbook_rule_id=playbook_id,
-                    ai_confidence=float(r.get("ai_confidence") or 1.0),
-                    sort_order=idx,
-                )
-                db.add(risk_obj)
-                db.flush()
-
-                for rf in r.get("legal_references") or []:
-                    db.add(
-                        ComplianceRiskReference(
-                            id=str(_uuid.uuid4()),
-                            risk_id=risk_obj.id,
-                            ref_type=rf.get("ref_type") or "regulation",
-                            ref_name=rf.get("ref_name") or "",
-                            ref_article=rf.get("ref_article"),
-                            ref_content=rf.get("ref_content") or "",
-                            ref_source_url=rf.get("ref_source_url"),
-                            verified=bool(rf.get("verified")),
-                        )
-                    )
-
-            now = datetime.now(_tz.utc)
-            for fmt in ("html", "word", "pdf"):
-                p = report_paths.get(fmt) if report_paths else None
-                if p:
-                    path_obj = Path(p)
-                    size = path_obj.stat().st_size if path_obj.is_file() else None
-                    db.add(
-                        ComplianceReport(
-                            id=str(_uuid.uuid4()),
-                            review_id=review_id,
-                            format=fmt,
-                            file_path=p,
-                            file_size=size,
-                            generated_at=now,
-                        )
-                    )
-
+            # 更新计数
             review.high_risk_count = int(risk_counts.get("high", 0))
             review.medium_risk_count = int(risk_counts.get("medium", 0))
             review.low_risk_count = int(risk_counts.get("low", 0))
@@ -362,7 +397,7 @@ class ComplianceHarness:
                 len(clauses or []),
                 len(risks or []),
             )
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             db.rollback()
             logger.exception("persist_results FAILED for review %s: %s", review_id, e)
             try:
@@ -371,7 +406,7 @@ class ComplianceHarness:
                     review.status = STATUS_FAILED
                     review.error_message = f"persist_results: {e}"
                     db.commit()
-            except Exception as e2:  # noqa: BLE001
+            except Exception as e2:
                 logger.warning("failed to mark review %s as failed: %s", review_id, e2)
         finally:
             db.close()
@@ -704,69 +739,14 @@ class ComplianceHarness:
         return hints
 
     def compare_template(self, state: dict) -> dict:
-        """企业模板比对：复用 Playbook standard_position 做偏离检测 + 建议补全 + 红线升级。
+        """企业模板比对 — 预留占位节点。
 
-        注：当前 should_compare() 恒返回 "skip"，此分支不会被触发。
-        函数体在模板比对功能开启时再启用。
+        compare 已注册为图节点（review_graph.py:33），但 should_compare() 恒返回 "skip"，
+        本节点在审查运行中不会被触发。启用时需：
+        1. 修改 should_compare() 返回 "compare"（基于 template_id 是否有效）
+        2. 在此实现模板加载 → 偏离检测 → 红线升级逻辑
         """
-        raise NotImplementedError(
-            "Template comparison not enabled — should_compare() returns 'skip'"
-        )
-        guarded = self._guard_failed(state)
-        if guarded is not None:
-            return guarded
-        risks = list(state.get("risks") or [])
-        rules = state.get("rules") or []
-        deviations = 0
-
-        for i, risk in enumerate(risks):
-            cn = risk.get("clause_number") or ""
-            best_rule = None
-            best_score = 0.0
-            for rule in rules:
-                rp = (rule.get("match_pattern") or "").lower()
-                if rp and (rp in cn.lower() or cn.lower() in rp):
-                    score = float(rule.get("priority") or 100)
-                    if score > best_score:
-                        best_score = score
-                        best_rule = rule
-            if not best_rule:
-                continue
-
-            enriched = dict(risk)
-            std_pos = best_rule.get("standard_position")
-            sugg = best_rule.get("suggested_clause")
-            red_line = best_rule.get("red_line", False)
-
-            if std_pos:
-                enriched["template_deviation"] = True
-                enriched["template_standard"] = std_pos
-                deviations += 1
-
-            if sugg and not enriched.get("suggestion"):
-                enriched["suggestion"] = sugg
-            elif sugg and enriched.get("suggestion") and sugg not in enriched.get("suggestion", ""):
-                enriched["suggestion"] = f"{enriched['suggestion']}（企业标准：{sugg}）"
-
-            if red_line and enriched.get("risk_level") != "high":
-                enriched["risk_level"] = "high"
-                enriched["red_line_flag"] = True
-
-            risks[i] = enriched
-
-        counts = {
-            "high_risk_count": sum(1 for r in risks if r.get("risk_level") == "high"),
-            "medium_risk_count": sum(1 for r in risks if r.get("risk_level") == "medium"),
-            "low_risk_count": sum(1 for r in risks if r.get("risk_level") == "low"),
-        }
-        self._persist_status(
-            state["review_id"],
-            STATUS_COMPARING,
-            template_deviations=deviations,
-            **counts,
-        )
-        logger.info("compare_template: %d deviations", deviations)
-        return {**state, "risks": risks, "template_deviations": deviations, **counts}
+        return state
 
     def human_review(self, state: dict) -> dict:
         """节点 human_review：HITL 阻塞落库后等待人工确认。
