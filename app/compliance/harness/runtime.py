@@ -371,18 +371,18 @@ class ComplianceHarness:
                 synchronize_session=False
             )
 
-            # ① 写条款 → 返回 clause_number → clause_id 映射（供 risk 追溯）
+            # 写条款 → 返回 clause_number → clause_id 映射（供 risk 追溯）
             clause_id_by_number = self._persist_clauses(db, review_id, compliance_doc_id, clauses)
 
-            # ② 写关键信息
+            # 写关键信息
             self._persist_key_info(db, review_id, compliance_doc_id, key_info)
 
             db.flush()
 
-            # ③ 写风险 + 引用
+            # 写风险 + 引用
             self._persist_risks(db, review_id, risks, clause_id_by_number)
 
-            # ④ 写报告
+            # 写报告
             self._persist_reports(db, review_id, report_paths)
 
             # 更新计数
@@ -410,17 +410,6 @@ class ComplianceHarness:
                 logger.warning("failed to mark review %s as failed: %s", review_id, e2)
         finally:
             db.close()
-
-    # 阶段进度映射（前端进度条 0~100 用，与 state.PHASE_ORDER 对应）
-    _PHASE_PROGRESS = {
-        STATUS_PARSING: 10,
-        STATUS_PLANNING: 25,
-        STATUS_REVIEWING: 50,
-        STATUS_REFLECTING: 70,
-        STATUS_PENDING_HUMAN: 80,
-        STATUS_GENERATING: 90,
-        STATUS_COMPLETED: 100,
-    }
 
     # ===================== 图节点（调用 skills/agents） =====================
 
