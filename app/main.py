@@ -1,6 +1,11 @@
 """FastAPI application entry point."""
 
+import os
 from contextlib import asynccontextmanager
+
+from dotenv import load_dotenv
+
+load_dotenv()  # 提前加载 .env 到 os.environ，供 LangChain tracer 等从 os.environ 读取的组件使用
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -68,6 +73,14 @@ async def lifespan(app: FastAPI):
     # 启动时 probe 一次 LLM/Embedding provider，结果缓存到 app.state。
     # readiness 不再实时调用 provider（耗 token + 慢 + 抢业务资源）。
     app.state.health_probes = _probe_providers()
+
+    # LangSmith 观测日志
+    if os.getenv("LANGCHAIN_TRACING_V2", "").lower() in ("true", "1"):
+        logger.info(
+            "LangSmith tracing enabled — project=%s, endpoint=%s",
+            os.getenv("LANGCHAIN_PROJECT", "zz-demand-system"),
+            os.getenv("LANGCHAIN_ENDPOINT", "https://api.smith.langchain.com"),
+        )
     yield
 
 

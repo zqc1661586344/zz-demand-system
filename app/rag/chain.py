@@ -247,7 +247,7 @@ def _rewrite_query(query: str, history: list[dict] | None, summary: str | None =
         messages.append(("human", query))
         prompt = ChatPromptTemplate.from_messages(messages)
         chain = prompt | get_llm() | StrOutputParser()
-        rewritten = chain.invoke({})
+        rewritten = chain.invoke({}, config={"tags": ["query_rewrite"]})
         return (rewritten or query).strip() or query
     except Exception:
         logger.warning("query rewrite failed, falling back to original query", exc_info=True)
@@ -334,7 +334,10 @@ def query_rag(
         # 检索为空或相关性不足 → 不走 RAG，改为纯 LLM 自由聊天（基于自身知识回答，不附带来源）。
         # 【根治】："找不到答案"提示语由前端按 free_chat 标记渲染，不进入模型输出路径，从而不会污染存库的历史消息，避免下一轮 LLM 模仿复述该提示语导致重复。
         chain = _build_free_chat_chain()
-        answer = chain.invoke({"question": query, "history": history_text})
+        answer = chain.invoke(
+            {"question": query, "history": history_text},
+            config={"tags": ["free_chat"]},
+        )
         return {
             "answer": answer,  # 纯模型回答，不含提示语
             "sources": [],
@@ -348,7 +351,10 @@ def query_rag(
 
     # 构建RAG链并调用
     chain = build_rag_chain()
-    answer = chain.invoke({"context": context, "question": query, "history": history_text})
+    answer = chain.invoke(
+        {"context": context, "question": query, "history": history_text},
+        config={"tags": ["rag", settings.rag_search_type]},
+    )
     answer = sanitize_citations(answer, sources)  # 剔除越界/错乱的[来源 N] 引用
 
     return {
@@ -376,7 +382,10 @@ def query_rag_stream(
         yield {"type": "free_chat", "data": True}
         full_answer = ""
         chain = _build_free_chat_chain()
-        for chunk in chain.stream({"question": query, "history": history_text}):
+        for chunk in chain.stream(
+            {"question": query, "history": history_text},
+            config={"tags": ["free_chat"]},
+        ):
             full_answer += chunk
             yield {"type": "token", "data": chunk}
         yield {"type": "sources", "data": [], "full_answer": full_answer}
@@ -387,7 +396,10 @@ def query_rag_stream(
     chain = build_rag_chain()
 
     full_answer = ""
-    for chunk in chain.stream({"context": context, "question": query, "history": history_text}):
+    for chunk in chain.stream(
+        {"context": context, "question": query, "history": history_text},
+        config={"tags": ["rag", settings.rag_search_type]},
+    ):
         full_answer += chunk
         yield {"type": "token", "data": chunk}
 
@@ -436,4 +448,4 @@ def generate_summary(messages: list[dict]) -> str:
     """根据一系列{角色, 内容}的消息，生成一个简洁的摘要。"""
     text = format_history(messages, summary=None)
     chain = _build_summary_chain()
-    return chain.invoke({"conversation": text})
+    return chain.invoke({"conversation": text}, config={"tags": ["summarize"]})
