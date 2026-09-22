@@ -334,14 +334,13 @@ flowchart LR
    - `pg_tsvector`（默认）：`sparse_search.tsvector_search()` 查 PG `search_text`，SQL WHERE 里用归一化 `ts_rank(...,1) > rag_sparse_min_rank` **把关弱命中**（只让真命中进入融合）。
    - `bm25_memory`（回退）：`get_bm25_for_user(user_id)` — 从 `_bm25_map` 取该用户索引，jieba + rank_bm25。
 3. **RRF 融合**：手写 `_rrf_fuse()` — `score(d) = Σ [weight/(c + rank_i(d))]`，`c=60`，去重键 `(document_id, page_content)`，凸组合权重 `[alpha, 1-alpha]`。
-4. **可选重排**：`_maybe_rerank()` — 若 `rag_rerank_enabled=true` 且 transformers 可用，调用 bge-reranker-v2-m3 交叉编码器。
+4. **可选重排**：`_maybe_rerank()` — 若 `rag_rerank_enabled=true` 且配置可用（支持 siliconflow 远端 API 或本地 HF 模型），调用交叉编码器重排。默认关闭（见决策记录）。
 5. **相关性判定**：
-   - **稀疏命中 → 融合后直接返回**（稀疏侧已完成 ts_rank 下限把关），仅当稠密侧对该 query 完全零相关（向量库空/embedding 失败，`not scored`）才回退 free chat。
-   - **稀疏为空（或把关后为空）→ 回退纯稠密**，此时才用「绝对阈值 + 离散度」双判据：
-
+   - **稀疏命中 → 融合后做最终分数把关**：用「绝对阈值 + 离散度」双判据（与纯稠密回退分支一致）：
      - `top-1 < rag_min_score（默认 0.4）` → 不相关
      - `top-1 - top-2 < rag_hybrid_min_spread（默认 0.015）` → 分数平带，无区分度
-     - 任一满足 → 判为未命中，返回空列表
+     - 任一满足 → 判为未命中，返回空列表走 free chat
+   - **稀疏为空（或把关后为空）→ 回退纯稠密**，同样用「绝对阈值 + 离散度」双判据。
 
 #### 模式 B：similarity — 纯向量检索
 
@@ -577,10 +576,12 @@ flowchart LR
     IMVS --> TopN["top-N 重排结果"]
 ```
 
-- 仅在 `rag_rerank_enabled=true` **且** `transformers + torch` 可用时生效
-- 模型：`bge-reranker-v2-m3`（可通过 `RAG_RERANK_MODEL` 配置）
-- 技术：`HuggingFaceCrossEncoder` → `CrossEncoderReranker` → `ContextualCompressionRetriever`
-- 资源要求：需下载模型（约 1.2GB），建议 8GB+ 内存，GPU 非必需但显著加速
+- 仅在 `rag_rerank_enabled=true` **且** 配置可用时生效（默认关闭）
+- 默认 provider：`siliconflow`（远端 `/v1/rerank` API，复用 LLM_API_BASE/LLM_API_KEY），回退 `local`（HuggingFace `bge-reranker-v2-m3`，需 transformers + torch）
+- 模型：`BAAI/bge-reranker-v2-m3`（可通过 `RAG_RERANK_MODEL` 配置）
+- 资源要求：local provider 需下载模型（约 1.2GB），建议 8GB+ 内存，GPU 非必需但显著加速
+
+> **决策记录（2026-09）**：`rag_rerank_enabled` 默认关闭。RAGAS 评估（k10 组）显示开启 rerank 后 context_precision 从 0.659 降至 0.607，bge-reranker-v2-m3 在中文法规场景的排序增益未达预期。待收集更多场景数据后可重新评估开启。`get_reranker()` 内置冷却降级（失败后 5 分钟静默，超时自动重试），可在生产按需开启。
 
 ---
 
@@ -645,17 +646,19 @@ llm_provider: Literal["openai", "ollama", "test"] = "openai"
 |--------|--------|------|
 | `RAG_SEARCH_TYPE` | `hybrid` | 检索模式：`similarity` / `mmr` / `hybrid` |
 | `RAG_HYBRID_ALPHA` | `0.5` | 稠密 vs 稀疏权重（0=纯BM25, 1=纯向量） |
-| `RAG_HYBRID_MIN_SPREAD` | `0.015` | 稀疏命为空回退纯稠密时的离散度判据：top-1 与 top-2 最小分数差 |
+| `RAG_HYBRID_MIN_SPREAD` | `0.015` | 稀疏为空回退纯稠密时的离散度判据：top-1 与 top-2 最小分数差 |
 | `RAG_MIN_SCORE` | `0.4` | 相关性绝对阈值（similarity 模式 + 稀疏为空回退纯稠密分支共用） |
-| `RAG_RERANK_ENABLED` | `false` | 是否启用 bge-reranker 交叉编码器重排 |
+| `RAG_SPARSE_BACKEND` | `pg_tsvector` | 稀疏检索后端：`pg_tsvector`（默认）/ `bm25_memory`（回退） |
+| `RAG_SPARSE_MIN_RANK` | `0.1` | pg_tsvector 稀疏把关下限（归一化 `ts_rank`，命中过滤在 SQL WHERE） |
+| `RAG_BM25_CACHE_BYPASS` | `false` | BM25 缓存绕过：True 则每次从 DB 全量重建（多 worker 正确但慢） |
+| `RAG_EMBEDDING_DIM` | `1024` | Embedding 向量维度（与 bge-m3 对齐，固定后方可建 HNSW 索引） |
+| `RAG_RERANK_ENABLED` | `false` | 是否启用交叉编码器重排（默认关闭，见五章决策记录） |
 | `RAG_RERANK_MODEL` | `BAAI/bge-reranker-v2-m3` | 重排器模型名或本地路径 |
 | `RAG_RERANK_TOP_N` | `5` | 重排后保留的 top-n 结果 |
 | `CHUNK_SIZE` | `800` | 文本分块大小（字符） |
 | `CHUNK_OVERLAP` | `150` | 分块重叠大小（字符） |
 | `VECTOR_STORE_URL` | `postgresql+psycopg://...` | PGVector 连接串（Oracle 模式指向 PG） |
 | `VECTOR_COLLECTION_NAME` | `documents` | PGVector collection 名 |
-| `RAG_SPARSE_BACKEND` | `pg_tsvector` | 稀疏检索后端：`pg_tsvector`（默认）/ `bm25_memory`（回退） |
-| `RAG_SPARSE_MIN_RANK` | `0.1` | pg_tsvector 稀疏把关下限（归一化 `ts_rank`，命中过滤在 SQL WHERE） |
 | `RECENT_ROUNDS` | `20` | 对话滑动窗口保留轮次（代码中常量） |
 | `SUMMARY_INTERVAL` | `40` 条消息 | 摘要触发间隔（每 20 轮） |
 

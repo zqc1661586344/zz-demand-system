@@ -17,6 +17,18 @@ TOP_K = 5
 FREE_CHAT_PREFIX = "**当前已有文档中找不到答案，以下由大模型自身知识回答：**\n\n"
 
 
+def _format_source(s: dict, idx: int, multi_file: bool) -> str:
+    """格式化单条来源展示。
+
+    - 单文件：直接显示文件名，无需 Source 编号
+    - 多文件：显示 [Source N] 前缀，方便对照回答中的引用
+    """
+    indices = s.get("source_indices", [s.get("source_index", idx + 1)])
+    prefix = f"[Source {', '.join(str(n) for n in indices)}] " if multi_file else ""
+    suffix = f" (p.{s['page']})" if s.get("page") else ""
+    return f"- {prefix}📄 {s.get('filename', 'Unknown')}{suffix}"
+
+
 def _ensure_conversation() -> str:
     """Get or create the current conversation ID from session state."""
     conv_id = st.session_state.get("conv_id")
@@ -75,10 +87,9 @@ def _display_messages():
             # Show sources for assistant messages
             sources = m.get("sources")
             if sources:
+                multi_file = len(sources) > 1
                 source_lines = "\n".join(
-                    f"- 📄 {s.get('filename', 'Unknown')}"
-                    + (f" (p.{s['page']})" if s.get("page") else "")
-                    for s in sources
+                    _format_source(s, i, multi_file) for i, s in enumerate(sources)
                 )
                 st.markdown("---\n**📎 来源文档**\n" + source_lines)
 
@@ -187,10 +198,9 @@ def page():
 
         # Show sources
         if sources:
+            multi_file = len(sources) > 1
             source_lines = "\n".join(
-                f"- 📄 {s.get('filename', 'Unknown')}"
-                + (f" (p.{s['page']})" if s.get("page") else "")
-                for s in sources
+                _format_source(s, i, multi_file) for i, s in enumerate(sources)
             )
             st.markdown("---\n**📎 来源文档**\n" + source_lines)
 

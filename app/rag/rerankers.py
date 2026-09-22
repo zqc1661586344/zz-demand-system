@@ -102,11 +102,11 @@ def _resolve_api_key() -> str:
 
 
 _built_reranker = None
-_reranker_lock = threading.Lock()
+_build_lock = threading.Lock()  # 只保护模型构建，耗时可能数秒
+_cooldown_lock = threading.Lock()  # 只保护冷却时间戳，轻量快速
 _reranker_fail_ts: float | None = None
 
 
-# TODO：冷却期锁竞争问题，需要优化
 def get_reranker():
     """延迟构建并缓存 CrossEncoderReranker（线程安全）。
 
@@ -115,18 +115,31 @@ def get_reranker():
 
     临时故障（API 超时/500）走冷却机制：记录失败时间，_RERANK_COOLDOWN_SEC 内
     返回 None，超时后重试。配置缺失/依赖安装失败则是永久 False（直到进程重启）。
+
+    锁策略：_build_lock（构建用，可能耗时数秒）与 _cooldown_lock（冷却用，轻量）
+    职责分离，避免冷却期所有请求被构建锁阻塞。
     """
     global _built_reranker, _reranker_fail_ts
 
-    with _reranker_lock:
+    # 冷却检查：使用独立轻量锁，不阻塞在构建锁上
+    with _cooldown_lock:
+        if _reranker_fail_ts is not None:
+            if time.time() - _reranker_fail_ts < _RERANK_COOLDOWN_SEC:
+                return None
+            _reranker_fail_ts = None
+
+    # 已构建检查：读操作无需锁（Python 全局解释器锁保证赋值可见性）
+    if _built_reranker is False:
+        return None
+    if _built_reranker is not None:
+        return _built_reranker
+
+    # 构建：使用独立锁，不阻塞冷却检查
+    with _build_lock:
+        # double-check：释放 _build_lock 后可能被其他线程抢先构建
         if _built_reranker is False:
             return None
-
         if _built_reranker is not None:
-            if _reranker_fail_ts is not None:
-                if time.time() - _reranker_fail_ts < _RERANK_COOLDOWN_SEC:
-                    return None
-                _reranker_fail_ts = None
             return _built_reranker
 
         if not settings.rag_rerank_enabled:
@@ -185,7 +198,7 @@ def get_reranker():
 def mark_reranker_failed() -> None:
     """_maybe_rerank 异常时调用，触发冷却降级而非永久禁用。"""
     global _reranker_fail_ts
-    with _reranker_lock:
+    with _cooldown_lock:
         prev = _reranker_fail_ts
         _reranker_fail_ts = time.time()
         if prev is not None:

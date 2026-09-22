@@ -53,7 +53,22 @@ class MarkdownHeaderStrategy(SplitterStrategy):
     def split_documents(self, documents: list[Document]) -> list[Document]:
         # Markdown 需要先拼回完整文本再切，才能正确识别标题层级
         text = "\n\n".join(d.page_content for d in documents)
-        return self._splitter.split_text(text)
+        chunks = self._splitter.split_text(text)
+
+        # ── 保留原始 metadata ──────────────────────────────────
+        # MarkdownHeaderTextSplitter.split_text() 接收纯文本字符串，
+        # 返回的 chunks 只有 splitter 注入的 header_* 元数据。
+        # pipeline.py 中注入的 filename / document_id / uploaded_by
+        # / visibility 全部丢失，需要手动补回。
+        if chunks and documents:
+            base = documents[0].metadata.copy()
+            # 不覆盖 header_* 元数据，只补 pipeline 注入的业务字段
+            for chunk in chunks:
+                for k, v in base.items():
+                    if not k.startswith("header_"):
+                        chunk.metadata.setdefault(k, v)
+
+        return chunks
 
 
 # HTML 切分器策略

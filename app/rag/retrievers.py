@@ -88,11 +88,16 @@ def _get_redis_ts(user_key: str) -> float | None:
 
     r = get_redis_client()
     if r is None:
+        logger.warning(
+            "Redis client unavailable, BM25 cache version check degraded to local TTL for %s",
+            user_key,
+        )
         return None
     try:
         ts = r.get(_redis_ts_key(user_key))
         return float(ts) if ts is not None else None
     except Exception:
+        logger.warning("Failed to read Redis BM25 ts for %s, degraded to local TTL", user_key)
         return None
 
 
@@ -426,20 +431,23 @@ def _hybrid_fusion(
 
     docs = _rrf_fuse(dense_docs, sparse_docs, settings.rag_hybrid_alpha)
 
-    # 【相关性兜底】融合后再用 dense 侧 top1 分数判定是否需要 free chat。
-    # 只检查 "dense 是否完全空" 太松——embedding 总会返回向量，PGVector 总能搜到邻近，但 top1 的 cosine 可能极低（query 和文档集完全不相关）。这里用 rag_min_score 做最终把关：dense top1 < 阈值 → 即使 sparse 有弱命中（刚好过 min_rank），也说明 query 真的不在知识库范围内，走 free chat。
+    # 【相关性兜底】融合后再用 dense 侧 top1 分数 + spread 离散度双判据判定是否需要 free chat。
+    # 只检查 "dense 是否完全空" 太松——embedding 总会返回向量，PGVector 总能搜到邻近，但 top1 的 cosine 可能极低（query 和文档集完全不相关）。这里用 rag_min_score + rag_hybrid_min_spread 做最终把关：dense top1 < 阈值 或 分数平带（top1-top2 差过窄）→ 即使 sparse 有弱命中（刚好过 min_rank），也说明 query 真的不在知识库范围内，走 free chat。
     if docs:
-        scored = similarity_search_with_relevance(query, k=1, user_id=user_id)
+        scored = similarity_search_with_relevance(query, k=min(top_k, 4), user_id=user_id)
         if not scored:
             logger.info("hybrid path but cosine found no match at all → free chat")
             return []
         top1 = scored[0][1]
-        if top1 < settings.rag_min_score:
+        spread = scored[0][1] - scored[1][1] if len(scored) >= 2 else 1.0
+        if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
             logger.info(
-                "hybrid path but dense top-1=%.3f < min_score=%.3f → free chat "
+                "hybrid path dense top-1=%.3f spread=%.3f (min=%.3f/%.3f) → free chat "
                 "(sparse hit too weak to justify RAG)",
                 top1,
+                spread,
                 settings.rag_min_score,
+                settings.rag_hybrid_min_spread,
             )
             return []
 

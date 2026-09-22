@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     rag_hybrid_min_spread: float = 0.015
 
     # --- Rerank 交叉编码器 ---
+    # 默认关闭 rerank。决策依据：RAGAS 评估（k10 组）显示开启后
+    # context_precision 从 0.659 降至 0.607，bge-reranker-v2-m3 在中文法规
+    # 场景的排序增益未达预期。待收集更多场景数据后可重新评估开启。
     rag_rerank_enabled: bool = False
     # local（本地 HF 模型）/ siliconflow（硅基 /v1/rerank 远端 API）
     rag_rerank_provider: Literal["local", "siliconflow"] = "siliconflow"
