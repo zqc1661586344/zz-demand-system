@@ -511,7 +511,13 @@ def _expand_query_variants(query: str, n: int) -> list[str]:
             [("system", _MULTI_QUERY_EXPAND_PROMPT), ("human", "{query}")]
         )
         chain = prompt | get_llm() | StrOutputParser()
-        raw = (chain.invoke({"n": n, "query": query}) or "").strip()
+        raw = (
+            chain.invoke(
+                {"n": n, "query": query},
+                config={"tags": ["multi_query_expand"]},
+            )
+            or ""
+        ).strip()
         lines = [ln.strip() for ln in raw.splitlines() if ln.strip()][:n]
     except Exception as e:
         logger.warning("multi-query expansion failed, falling back to single query: %s", e)
@@ -588,7 +594,21 @@ def multi_query_search(query: str, top_k: int = 5, user_id: str | None = None) -
     # 3. 逐路检索，候选放大以便去重后仍有足够候选
     per_query_k = min(int(top_k * settings.rag_multi_query_top_k_scale), 50)
     per_query_k = max(per_query_k, top_k)  # 至少检索 top_k 个候选
-    ranked_lists = [hybrid_search(q, top_k=per_query_k, user_id=user_id) for q in variants]
+
+    if len(variants) <= 1:
+        ranked_lists = [hybrid_search(variants[0], top_k=per_query_k, user_id=user_id)]
+    else:
+        # 并行执行各路检索，把串行 n 路的延迟摊到 n 个 worker 上。
+        # 线程安全：embedding/LLM client 均为 lru_cache 单例（remote provider 线程安全），
+        # BM25 走 _bm25_lock(RLock)、PGVector 走连接池、reranker 构建持 _build_lock。
+        # map() 保持传入顺序，保证排名/权重语义与串行完全一致。
+        _workers = min(len(variants), settings.rag_multi_query_max_workers)
+        from concurrent.futures import ThreadPoolExecutor
+
+        with ThreadPoolExecutor(max_workers=_workers) as pool:
+            ranked_lists = list(
+                pool.map(lambda q: hybrid_search(q, top_k=per_query_k, user_id=user_id), variants)
+            )
 
     # 4. free-chat 判定以原问题为准：首路为空 → 整体 free chat
     if not ranked_lists[0]:

@@ -125,6 +125,10 @@ class Settings(BaseSettings):
     rag_multi_query_primary_weight: float = 0.5
     # 每路检索的候选放大倍数（每路实际检索 top_k*放大，合并后再取 top_k）。
     rag_multi_query_top_k_scale: float = 2.0
+    # 多路检索的并行 worker 上限。各路含 PGVector/稀疏 SQL/embedding 调用，
+    # 串行会把单路延迟放大 n 倍；并行摊到 min(n, max_workers) 个线程上。
+    # 线程安全已满足（lru_cache 单例 client + BM25 RLock + PG 连接池）。
+    rag_multi_query_max_workers: int = 4
 
     # --- 自动化回归评估 ---
     # EvalRun 表保留最近 N 轮评估历史（评估低频低量，默认 30 即可覆盖趋势回顾）。
@@ -135,6 +139,8 @@ class Settings(BaseSettings):
     rag_eval_baseline_window: int = 1
     # 某指标相对基线下降超过该阈值（绝对值，0~1）即判定为回归。
     rag_eval_regression_threshold: float = 0.05
+    # 触发评估子进程的超时（秒）。评估会用 LLM 逐个样本生成+打分，大模型慢时易触顶，不宜设过小。
+    rag_eval_subprocess_timeout: int = 1800
 
     # Upload 文件上传存储路径配置
     upload_dir: str = "./data/uploads"

@@ -693,6 +693,7 @@ llm_provider: Literal["openai", "ollama", "test"] = "openai"
 | `RAG_MULTI_QUERY_N` | `3` | Multi-Query 视角数，含原问题（默认 3 = 原问题 + 2 个改写视角，≥2 才生效） |
 | `RAG_MULTI_QUERY_PRIMARY_WEIGHT` | `0.5` | 原问题在二级 RRF 融合中的权重；其余视角平分 `(1-权重)/(n-1)` |
 | `RAG_MULTI_QUERY_TOP_K_SCALE` | `2.0` | 每路候选放大倍数（每路检索 `top_k*放大，上限 50`，合并后再截回 top_k） |
+| `RAG_MULTI_QUERY_MAX_WORKERS` | `4` | 多路检索并行 worker 上限（串行 n 路延迟摊到 `min(n, max_workers)` 线程，顺序/权重语义不变） |
 | `RAG_SPARSE_BACKEND` | `pg_tsvector` | 稀疏检索后端：`pg_tsvector`（默认）/ `bm25_memory`（回退） |
 | `RAG_SPARSE_MIN_RANK` | `0.1` | pg_tsvector 稀疏把关下限（归一化 `ts_rank`，命中过滤在 SQL WHERE） |
 | `RAG_BM25_CACHE_BYPASS` | `false` | BM25 缓存绕过：True 则每次从 DB 全量重建（多 worker 正确但慢） |
@@ -706,6 +707,10 @@ llm_provider: Literal["openai", "ollama", "test"] = "openai"
 | `VECTOR_COLLECTION_NAME` | `documents` | PGVector collection 名 |
 | `RECENT_ROUNDS` | `20` | 对话滑动窗口保留轮次（代码中常量） |
 | `SUMMARY_INTERVAL` | `40` 条消息 | 摘要触发间隔（每 20 轮） |
+| `RAG_EVAL_SUBPROCESS_TIMEOUT` | `1800` | 触发评估子进程的超时（秒）。评估用 LLM 逐个样本生成+打分，不宜设过小 |
+| `RAG_EVAL_KEEP_RECENT` | `30` | EvalRun 表保留的最近评估轮数（写入后自动清理更早记录） |
+| `RAG_EVAL_BASELINE_WINDOW` | `1` | 回归基线取最近 N 次评估的均值；默认 1 = 最近一次（单次波动大可调 3/5） |
+| `RAG_EVAL_REGRESSION_THRESHOLD` | `0.05` | 某指标相对基线下降超过该阈值（绝对值 0~1）即判定为回归 |
 
 ---
 

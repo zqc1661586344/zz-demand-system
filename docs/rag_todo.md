@@ -69,7 +69,7 @@
 >
 > 例：用户问"公司裁员不想给赔偿金"，混合检索两个通道都因问法太口语化而召回不佳；Multi-Query 改写为"公司单方解除劳动合同经济补偿的支付情形"才能命中条款。两者叠加才构成业界标准的多路召回。
 
-#### 实施方案（已确认，待编码）
+#### 实施方案（已完成）
 
 **设计定位**：把现有 `hybrid_search` 升级为"上层编排器"，每一路仍走完整混合检索，复用已有的 RRF 融合哲学，且不改动 free-chat 判定语义。
 
@@ -82,7 +82,7 @@
                                                           └→ 二级RRF合并 → top_k
 ```
 
-**① `app/config.py` — 加 4 个配置项**（`rag_min_score` 附近）
+**① `app/config.py` — 加 5 个配置项**（`rag_min_score` 附近）
 
 ```python
 # ---- Multi-Query 多路召回 ----
@@ -90,6 +90,7 @@ rag_multi_query_enabled: bool = True           # 总开关，确认默认开启
 rag_multi_query_n: int = 3                     # 含原问题在内的视角数（>=2），确认默认 3
 rag_multi_query_primary_weight: float = 0.5    # 原问题在融合时的权重，其余视角平分剩余
 rag_multi_query_top_k_scale: float = 2.0       # 每路检索的候选放大倍数（合并后取 top_k）
+rag_multi_query_max_workers: int = 4           # 多路检索的并行 worker 上限（评审 P1 新增）
 ```
 
 **② `app/rag/retrievers.py` — 新增 2 函数 + 1 prompt**（`hybrid_search` 之后）
@@ -103,7 +104,7 @@ rag_multi_query_top_k_scale: float = 2.0       # 每路检索的候选放大倍�
 - `multi_query_search(query, top_k=5, user_id=None) -> list[Document]`：
   1. 开关关 / n<2 → 直接 `hybrid_search`（零开销退化）
   2. `_expand_query_variants` 扩展视角
-  3. 每路以 `top_k * rag_multi_query_top_k_scale`（上限 50）调 `hybrid_search`
+  3. 每路以 `top_k * rag_multi_query_top_k_scale`（上限 50）调 `hybrid_search`；多路用 `ThreadPoolExecutor(min(n, rag_multi_query_max_workers))` **并行**执行（评审 P1），`map()` 保持结果原顺序，n=1 自动退化为同步单路
   4. **free-chat 判定以原问题为准**：原问题一路为空 → 整体返回空（free chat），多路只增强召回、不改变该语义
   5. 其余视角全空 → 直接用原问题结果 `[:top_k]`
   6. 否则 `_cross_query_fuse` 二级 RRF → `[:top_k]`
@@ -182,16 +183,18 @@ return multi_query_search(query, top_k=top_k, user_id=user_id)
 
 #### 实施方案（已完成）
 
-**① `app/models/eval.py` — 新增 2 张表**（复用现有 `Base` + `init_db().create_all`，与 Document 一致）
+**① `app/models/eval.py` — 新增 2 张表**（复用现有 `Base`；`GoldenDataset` + `EvalRun` 的表结构已补 Alembic 迁移 `d4e5f6a7b8c9_add_eval_tables`，development 仍走 `create_all` 兜底，production 依赖迁移）
 
 - `GoldenDataset`：`id / name / question / ground_truth / domain / tags(json) / enabled`
 - `EvalRun`：`id / trigger(manual|auto|cli) / params(json，含 top_k、search_type、multi_query_enabled 等当前 settings) / metric_values(json) / dataset_name / status(success|failed) / notes / created_at`
 
-**② `app/config.py` — 加 2 个可配置项**
+**② `app/config.py` — 加 4 个可配置项**
 
 ```python
-rag_eval_keep_recent: int = 30        # EvalRun 保留最近 N 轮（已确认默认 30）
-rag_eval_baseline_window: int = 1     # 基线取最近 N 次均值；默认 1 = 最近一次
+rag_eval_keep_recent: int = 30            # EvalRun 保留最近 N 轮（已确认默认 30）
+rag_eval_baseline_window: int = 1         # 基线取最近 N 次均值；默认 1 = 最近一次
+rag_eval_regression_threshold: float = 0.05  # 相对基线跌幅阈值，超过判回归
+rag_eval_subprocess_timeout: int = 1800   # 触发评估子进程的超时（秒）
 ```
 
 **③ `scripts/eval_ragas.py` — 扩展子命令**
@@ -211,11 +214,10 @@ def check_regression(new_metrics, baseline_metrics, threshold=0.05):
 # 有回归 → logger.error + sys.exit(1)；无 → sys.exit(0)
 ```
 
-**④ `app/api/eval.py` — 手动触发 API**
+**④ `app/api/eval.py` — 手动触发 API**（admin 角色）
 
-- `POST /api/eval/run`：celery 异步跑一次，返回 `run_id`
-- `GET /api/eval/runs`：历史列表
-- `GET /api/eval/runs/{id}`：单次详情
+- `POST /api/eval/run`：celery 或 BackgroundTasks 子进程异步跑一次，返回排队状态；`scene` 已用 `Literal["rag","compliance","all"]` 做枚举校验，非法值由 Pydantic 直接 422
+- `GET /api/eval/history`：历史列表（按 `scene` 过滤 + `limit`）
 
 **⑤ EvalRun 自动清理**：每次写入后 `DELETE WHERE id NOT IN (SELECT id ... ORDER BY created_at DESC LIMIT rag_eval_keep_recent)`。
 

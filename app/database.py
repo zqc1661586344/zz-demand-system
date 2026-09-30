@@ -49,8 +49,14 @@ def get_db():
 
 
 def init_db():
-    """Create all tables and seed default data. Called on startup."""
-    Base.metadata.create_all(bind=engine)
+    """Create all tables and seed default data. Called on startup.
+
+    仅 development 用 `Base.metadata.create_all` 一键建表（快速起服务）。
+    production 依赖 Alembic 迁移维护 schema（含 eval 两张表），
+    避免 create_all 对已存在表补列时静默失败、且与版本体系割裂。
+    """
+    if settings.environment == "development":
+        Base.metadata.create_all(bind=engine)
     _seed_roles()
 
 
