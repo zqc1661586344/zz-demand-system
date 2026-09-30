@@ -53,6 +53,8 @@ from datasets import Dataset
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
+GOLDEN_DIR = PROJECT_ROOT / "datasets" / "golden"
+
 from ragas import evaluate
 from ragas.embeddings import LangchainEmbeddingsWrapper
 from ragas.llms import LangchainLLMWrapper
@@ -281,7 +283,200 @@ def run_evaluation(
 # ---------------------------------------------------------------------------
 
 
+def _cmd_golden_seed(json_paths: list[str]) -> int:
+    """golden seed — 把 goldset JSON 导入 GoldenDataset 表。"""
+    from app.database import SessionLocal
+    from app.services.eval_service import seed_golden_from_json
+
+    db = SessionLocal()
+    try:
+        total = 0
+        for p in json_paths or [str(GOLDEN_DIR / "labor_contract.json")]:
+            if not Path(p).exists():
+                print(f"  ❌ 文件不存在: {p}")
+                continue
+            total += seed_golden_from_json(db, str(p))
+        print(f"\n✅ golden seed 完成，共导入 {total} 条")
+        return 0
+    finally:
+        db.close()
+
+
+def _cmd_golden_list(domain: str | None) -> int:
+    from app.database import SessionLocal
+    from app.services.eval_service import list_golden
+
+    db = SessionLocal()
+    try:
+        items = list_golden(db, domain=domain)
+        if not items:
+            print("  (空) 先用 `golden seed` 导入测试集")
+            return 0
+        print(f"共 {len(items)} 条 golden 题目:")
+        for it in items:
+            tags = ",".join(it["tags"]) if it["tags"] else "-"
+            print(f"  [{it['id'][:8]}] {it['name']} (domain={it['domain'] or '-'}, tags={tags})")
+        return 0
+    finally:
+        db.close()
+
+
+def _metric_means(df: pd.DataFrame, metric_names: list[str]) -> dict:
+    """从评估结果 DataFrame 提取各指标均值。"""
+    means = {}
+    for m in metric_names:
+        if m in df.columns:
+            try:
+                means[m] = float(df[m].astype(float).mean())
+            except (TypeError, ValueError):
+                continue
+    return means
+
+
+def _cmd_run(argv: list[str]) -> int:
+    """run <scene> [--threshold X] [--top-k N] [--dataset FILE] [--save CSV] — 跑评估、写 EvalRun、对比基线、返回退出码。
+
+    退出码: 0=通过/无回归, 1=有回归或失败（便于 CI/脚本串联）。
+    """
+    parser = argparse.ArgumentParser(description="run — 跑 RAG 评估并对比基线")
+    parser.add_argument("scene", nargs="?", default="rag", help="rag | compliance | all")
+    parser.add_argument("--threshold", type=float, default=None)
+    parser.add_argument("--top-k", type=int, default=5)
+    parser.add_argument("--dataset", type=Path, default=None)
+    parser.add_argument("--save", type=Path, default=None)
+    args = parser.parse_args(argv)
+
+    return _run_eval_and_persist(
+        scene=args.scene,
+        metric_names=["faithfulness", "answer_relevancy", "context_recall", "context_precision"],
+        threshold=args.threshold,
+        trigger="cli",
+        top_k=args.top_k,
+        dataset_path=str(args.dataset) if args.dataset else None,
+        save_to=args.save,
+    )
+
+
+def _cmd_history(scene: str | None) -> int:
+    """history — 查看历史评估趋势。"""
+    from app.database import SessionLocal
+    from app.services.eval_service import get_history
+
+    db = SessionLocal()
+    try:
+        runs = get_history(db, scene=scene, limit=30)
+        if not runs:
+            print("  (空) 还没有评估历史 — 先跑 `run rag`")
+            return 0
+        print(f"最近 {len(runs)} 次评估:")
+        for r in runs:
+            mv = ", ".join(f"{k}={v:.3f}" for k, v in r["metric_values"].items())
+            print(
+                f"  [{r['created_at'][:19]}] {r['scene']:10} {r['trigger']:6} "
+                f"{r['status']:7} {mv or '(n/a)'} notes={r['notes'] or '-'}"
+            )
+        return 0
+    finally:
+        db.close()
+
+
+def _run_eval_and_persist(
+    *,
+    scene: str,
+    metric_names: list[str],
+    threshold: float | None,
+    trigger: str,
+    top_k: int = 5,
+    dataset_path: str | None = None,
+    review_id: str | None = None,
+    save_to: Path | None = None,
+) -> int:
+    """核心执行流程：构数据集 → 评估 → 写 EvalRun → 基线对比 → 返回退出码。
+
+    供 _cmd_run 与旧式 main() 场景共用。
+    """
+    from app.services.eval_service import run_and_persist_eval
+
+    print("🔧 初始化 LangChain LLM / Embedding ...")
+    lc_llm = get_llm()
+    lc_emb = get_embedding_model()
+    llm_wrapper = LangchainLLMWrapper(lc_llm)
+    emb_wrapper = LangchainEmbeddingsWrapper(lc_emb)
+
+    print(f"   LLM:       {settings.llm_provider}")
+    print(f"   Embedding: {settings.embedding_provider}")
+    print(f"   RAG mode:  {settings.rag_search_type}")
+
+    all_results: dict[str, pd.DataFrame] = {}
+    metrics_by_scene: dict[str, dict] = {}
+
+    if scene in ("rag", "all"):
+        test_cases = RAG_SAMPLE_DATASET
+        if dataset_path:
+            with open(dataset_path, encoding="utf-8") as f:
+                test_cases = json.load(f)
+        print(f"\n🔎 构建 RAG 评估数据集 (top_k={top_k}, {len(test_cases)} 条 query)")
+        dataset = build_rag_dataset(test_cases, top_k=top_k)
+        df = run_evaluation(dataset, metric_names, llm_wrapper, emb_wrapper, tag="RAG")
+        if not df.empty:
+            all_results["rag"] = df
+            metrics_by_scene["rag"] = _metric_means(df, metric_names)
+
+    if scene in ("compliance", "all"):
+        print("\n🔎 构建合规审查引用评估数据集")
+        dataset = build_compliance_dataset(review_id=review_id)
+        df = run_evaluation(dataset, metric_names, llm_wrapper, emb_wrapper, tag="Compliance")
+        if not df.empty:
+            all_results["compliance"] = df
+            metrics_by_scene["compliance"] = _metric_means(df, metric_names)
+
+    # 写入 EvalRun + 基线对比 + 回归判定
+    exit_code = 0
+    for sc, mv in metrics_by_scene.items():
+        result = run_and_persist_eval(
+            scene=sc,
+            metric_values=mv,
+            dataset_name=str(dataset_path) if dataset_path else "golden",
+            trigger=trigger,
+            threshold=threshold,
+            notes=f"eval_ragas run scene={sc}",
+        )
+        print(f"\n⚖️  [{sc}] 基线对比 (threshold={result['threshold']}):")
+        if result["baseline"]:
+            for m, bv in result["baseline"].items():
+                cv = mv.get(m)
+                marker = "🔴 REGRESSION" if m in result["regressions"] else "🟢"
+                print(f"    {m:20} base={bv:.3f}  now={cv:.3f} {marker}")
+        else:
+            print(f"    无基线（首次评估）")
+        if result["regressions"]:
+            exit_code = 1
+
+    # 可选：保存 CSV
+    if save_to and all_results:
+        save_to.parent.mkdir(parents=True, exist_ok=True)
+        for tag, df in all_results.items():
+            path = save_to.with_name(f"{save_to.stem}_{tag}{save_to.suffix}")
+            df.to_csv(path, index=False, encoding="utf-8-sig")
+            print(f"\n💾 [{tag}] 已保存: {path}")
+
+    print(f"\n{'✅ 评估完成，无回归' if exit_code == 0 else '❌ 评估完成，检测到回归'}")
+    return exit_code
+
+
 def main():
+    import sys as _sys
+
+    # 新式命令路由：golden / run / history（保持旧式 scene 用法向后兼容）
+    if len(_sys.argv) > 1 and _sys.argv[1] in ("golden", "run", "history"):
+        if _sys.argv[1] == "golden":
+            if len(_sys.argv) <= 2 or _sys.argv[2] == "list":
+                return _cmd_golden_list(None)
+            return _cmd_golden_seed(_sys.argv[3:])  # golden seed <paths...>
+        if _sys.argv[1] == "history":
+            return _cmd_history(None)
+        return _cmd_run(_sys.argv[2:])  # run <scene> [--threshold ..]
+
     parser = argparse.ArgumentParser(
         description="Ragas 轻量评估 — RAG 问答链路 + 合规审查引用质量",
     )
@@ -322,48 +517,18 @@ def main():
 
     metric_names = [m.strip() for m in args.metrics.split(",") if m.strip()]
 
-    print("🔧 初始化 LangChain LLM / Embedding ...")
-    lc_llm = get_llm()
-    lc_emb = get_embedding_model()
-    llm_wrapper = LangchainLLMWrapper(lc_llm)
-    emb_wrapper = LangchainEmbeddingsWrapper(lc_emb)
-
-    print(f"   LLM:       {settings.llm_provider}")
-    print(f"   Embedding: {settings.embedding_provider}")
-    print(f"   RAG mode:  {settings.rag_search_type}")
-
-    all_results: dict[str, pd.DataFrame] = {}
-
-    if args.scene in ("rag", "all"):
-        test_cases = RAG_SAMPLE_DATASET
-        if args.dataset:
-            print(f"\n📂 加载自定义测试集: {args.dataset}")
-            with open(args.dataset, encoding="utf-8") as f:
-                test_cases = json.load(f)
-
-        print(f"\n🔎 构建 RAG 评估数据集 (top_k={args.top_k}, {len(test_cases)} 条 query)")
-        dataset = build_rag_dataset(test_cases, top_k=args.top_k)
-
-        df = run_evaluation(dataset, metric_names, llm_wrapper, emb_wrapper, tag="RAG")
-        if not df.empty:
-            all_results["rag"] = df
-
-    if args.scene in ("compliance", "all"):
-        print("\n🔎 构建合规审查引用评估数据集")
-        dataset = build_compliance_dataset(review_id=args.review_id)
-
-        df = run_evaluation(dataset, metric_names, llm_wrapper, emb_wrapper, tag="Compliance")
-        if not df.empty:
-            all_results["compliance"] = df
-
-    if args.save and all_results:
-        args.save.parent.mkdir(parents=True, exist_ok=True)
-        for tag, df in all_results.items():
-            path = args.save.with_name(f"{args.save.stem}_{tag}{args.save.suffix}")
-            df.to_csv(path, index=False, encoding="utf-8-sig")
-            print(f"\n💾 [{tag}] 已保存: {path}")
-
-    print("\n✅ 评估完成")
+    dataset_path = str(args.dataset) if args.dataset else None
+    rc = _run_eval_and_persist(
+        scene=args.scene,
+        metric_names=metric_names,
+        threshold=None,
+        trigger="cli",
+        top_k=args.top_k,
+        dataset_path=dataset_path,
+        review_id=args.review_id,
+        save_to=args.save,
+    )
+    sys.exit(rc)
 
 
 if __name__ == "__main__":

@@ -126,6 +126,16 @@ class Settings(BaseSettings):
     # 每路检索的候选放大倍数（每路实际检索 top_k*放大，合并后再取 top_k）。
     rag_multi_query_top_k_scale: float = 2.0
 
+    # --- 自动化回归评估 ---
+    # EvalRun 表保留最近 N 轮评估历史（评估低频低量，默认 30 即可覆盖趋势回顾）。
+    # 写入后自动清理更早记录。
+    rag_eval_keep_recent: int = 30
+    # 回归基线取最近 N 次评估的均值；默认 1 = 最近一次。
+    # 若 Ragas 单次波动导致误报，可调大为 3 或 5（需配合 rag_eval_keep_recent 足够大）。
+    rag_eval_baseline_window: int = 1
+    # 某指标相对基线下降超过该阈值（绝对值，0~1）即判定为回归。
+    rag_eval_regression_threshold: float = 0.05
+
     # Upload 文件上传存储路径配置
     upload_dir: str = "./data/uploads"
     max_upload_size_mb: int = 50

@@ -7,6 +7,7 @@ from app.models.user import User, Role, UserRole
 from app.models.document import Document, DocumentChunk
 from app.models.conversation import Conversation, Message
 from app.models.workflow import WorkflowDefinition, WorkflowInstance, WorkflowStep
+from app.models.eval import EvalRun, GoldenDataset
 
 # 合规审查模块模型：受 COMPLIANCE_ENABLED 门控。
 # 注册到 Base.metadata 后，init_db() 的 create_all 会自动建表（compliance_* 前缀），
@@ -28,4 +29,6 @@ __all__ = [
     "WorkflowDefinition",
     "WorkflowInstance",
     "WorkflowStep",
+    "EvalRun",
+    "GoldenDataset",
 ]

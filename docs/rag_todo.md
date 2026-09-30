@@ -169,15 +169,68 @@ return multi_query_search(query, top_k=top_k, user_id=user_id)
 - **改动文件**：`app/rag/chain.py`（~40 行）
 - **预期收益**：减少 token 消耗 20-30%，LLM 注意力更集中。
 
-### □ 6. 自动化回归评估
+### ✅ 6. 自动化回归评估（已完成）
 
 - **问题**：Ragas 评估需手动执行 `scripts/eval_ragas.py`，参数调整后无法自动验证效果。
 - **方案**：
-  - 固定评估集（golden dataset）入库
-  - API 加 `POST /api/eval/run`
-  - CI/CD 钩子：文档变更后自动触发评估
-- **改动文件**：`app/api/` + `scripts/eval_ragas.py` + CI 配置（~100 行）
+  - 固定评估集（golden dataset）入库 + 存 `datasets/golden/*.json`
+  - **CLI + API 都做**（先 CLI 打通核心，再包 API）
+  - 基线用**最近一次**（`baseline-window=1`，预留可调），跌超阈值 → 退出码 1
+  - `EvalRun` 表保留**最近 30 轮**（可配置），写入后自动清理更久记录
+- **改动文件**：`app/models/eval.py` + `app/api/eval.py` + `scripts/eval_ragas.py` + `app/config.py`
 - **预期收益**：每次改动都能量化影响，避免回归。
+
+#### 实施方案（已完成）
+
+**① `app/models/eval.py` — 新增 2 张表**（复用现有 `Base` + `init_db().create_all`，与 Document 一致）
+
+- `GoldenDataset`：`id / name / question / ground_truth / domain / tags(json) / enabled`
+- `EvalRun`：`id / trigger(manual|auto|cli) / params(json，含 top_k、search_type、multi_query_enabled 等当前 settings) / metric_values(json) / dataset_name / status(success|failed) / notes / created_at`
+
+**② `app/config.py` — 加 2 个可配置项**
+
+```python
+rag_eval_keep_recent: int = 30        # EvalRun 保留最近 N 轮（已确认默认 30）
+rag_eval_baseline_window: int = 1     # 基线取最近 N 次均值；默认 1 = 最近一次
+```
+
+**③ `scripts/eval_ragas.py` — 扩展子命令**
+
+- `golden seed ./datasets/golden/*.json`：导入测试集入库
+- `golden list`：列出测试集
+- `run rag --threshold 0.05 --baseline-last`：执行 → 写 `EvalRun` → 与 baseline 比较 → 退出码 0/1
+- `history`：查看历史趋势
+- 保留现有 `rag / compliance / all` 子命令向后兼容
+
+回归判定核心：
+```python
+def check_regression(new_metrics, baseline_metrics, threshold=0.05):
+    return {m: {"baseline": b, "current": v, "delta": b - v}
+            for m, v in new_metrics.items()
+            if m in baseline_metrics and (baseline_metrics[m] - v) > threshold}
+# 有回归 → logger.error + sys.exit(1)；无 → sys.exit(0)
+```
+
+**④ `app/api/eval.py` — 手动触发 API**
+
+- `POST /api/eval/run`：celery 异步跑一次，返回 `run_id`
+- `GET /api/eval/runs`：历史列表
+- `GET /api/eval/runs/{id}`：单次详情
+
+**⑤ EvalRun 自动清理**：每次写入后 `DELETE WHERE id NOT IN (SELECT id ... ORDER BY created_at DESC LIMIT rag_eval_keep_recent)`。
+
+> **本期不做 CI 文件**：项目无 `.github` 目录，先落地 CLI + API。有 CI 基建后再加 workflow 按退出码判回归。
+
+#### 关键设计决策
+
+| 决策 | 理由 |
+|------|------|
+| CLI + API 都做 | 覆盖开发机快速验证 + 非技术/定时/CI 入口 |
+| 基线=最近一次 | 简单；`--baseline-window` 预留可升级为均值 |
+| 保留 30 轮 | 低频低量（几百字节/条），30 覆盖趋势回顾 + 均值平滑，不占资源 |
+| 退出码 0/1 | 便于 CI/脚本串联判回归 |
+| 异步 celery | 评估耗时长，不阻塞请求 |
+| 阈值加容差 | Ragas 有随机性，容差防误报 |
 
 ---
 
