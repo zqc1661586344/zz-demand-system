@@ -293,9 +293,9 @@ def _retrieve_relevant_docs(
     if settings.rag_search_type == "hybrid":
         logger.info("rag search type is hybrid")
 
-        from app.rag.retrievers import hybrid_search
+        from app.rag.retrievers import multi_query_search
 
-        return hybrid_search(query, top_k=top_k, user_id=user_id)
+        return multi_query_search(query, top_k=top_k, user_id=user_id)
 
     # 最大边际相关性——先查再按cosine分数阈值过滤，不够的走 free chat
     elif settings.rag_search_type == "mmr":

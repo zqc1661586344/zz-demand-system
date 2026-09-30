@@ -115,6 +115,17 @@ class Settings(BaseSettings):
     # 稠密 top1 分数低于此值 → 判定为与文档集无关 → free chat
     rag_min_score: float = 0.4
 
+    # --- Multi-Query 多路召回 ---
+    # 把用户问题扩展为多个视角分别检索再合并，提升复合问题召回率。
+    # 默认开启；关闭后 multi_query_search 退化为单路 hybrid_search（零开销）。
+    rag_multi_query_enabled: bool = True
+    # 含原问题在内的视角数（>=2）。默认 3：原问题 + 2 个改写视角。
+    rag_multi_query_n: int = 3
+    # 原问题在二级 RRF 融合时的权重；其余视角平分 (1-权重)/(n-1)。
+    rag_multi_query_primary_weight: float = 0.5
+    # 每路检索的候选放大倍数（每路实际检索 top_k*放大，合并后再取 top_k）。
+    rag_multi_query_top_k_scale: float = 2.0
+
     # Upload 文件上传存储路径配置
     upload_dir: str = "./data/uploads"
     max_upload_size_mb: int = 50

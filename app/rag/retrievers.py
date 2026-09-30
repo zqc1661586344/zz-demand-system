@@ -481,6 +481,132 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
 
 
 # ---------------------------------------------------------------------------
+# Multi-Query 多路召回 — hybrid_search 的上层编排
+# ---------------------------------------------------------------------------
+
+# 视角扩展 prompt：第 1 个强制原样保留原问题，其余从不同角度改写以增强召回。
+_MULTI_QUERY_EXPAND_PROMPT = """你是一个文档检索专家。请将用户的问题改写为 {n} 个不同的表述，每个表述从一个不同角度尽可能还原用户想查的信息，以利于文档检索召回。
+
+要求：
+1. 第 1 个必须原样保留用户问题。
+2. 其余 {n-1} 个从不同角度改写：补充同义词/关键词、补充上下文、拆解子问题、转换视角等。
+3. 每个表述独占一行，不要编号、不要引号、不要任何额外说明。
+4. 每个表述尽量简洁，不超过 40 字。
+
+用户问题：{query}"""
+
+
+def _expand_query_variants(query: str, n: int) -> list[str]:
+    """调用 LLM 把 query 扩展为 n 个视角的查询列表。
+
+    第一个强制为原问题；LLM 失败/返回异常/行数不足时，用原问题补齐/回退。
+    """
+    from langchain_core.output_parsers import StrOutputParser
+    from langchain_core.prompts import ChatPromptTemplate
+
+    from app.rag.llms import get_llm
+
+    try:
+        prompt = ChatPromptTemplate.from_messages(
+            [("system", _MULTI_QUERY_EXPAND_PROMPT), ("human", "{query}")]
+        )
+        chain = prompt | get_llm() | StrOutputParser()
+        raw = (chain.invoke({"n": n, "query": query}) or "").strip()
+        lines = [ln.strip() for ln in raw.splitlines() if ln.strip()][:n]
+    except Exception as e:
+        logger.warning("multi-query expansion failed, falling back to single query: %s", e)
+        lines = []
+
+    if not lines:
+        return [query]
+
+    # 强制第 1 路为原问题，确保精度最高的一路永远存在
+    variants = lines
+    if variants[0] != query:
+        variants[0] = query
+    # 补齐到 n 个视角（去空、去与原问题重复的视角），避免候选过少
+    deduped = []
+    seen = set()
+    for v in variants + [query]:
+        if v and v not in seen:
+            deduped.append(v)
+            seen.add(v)
+        if len(deduped) >= n:
+            break
+    return deduped
+
+
+def _cross_query_fuse(
+    ranked_lists: list[list[Document]],
+    top_k: int,
+    primary_weight: float,
+    c: int = 60,
+) -> list[Document]:
+    """多路结果的二级 RRF 融合。
+
+    - 去重键与 _rrf_fuse 一致：(document_id, page_content)
+    - 首路（原问题）权重 primary_weight，其余视角平分 (1-primary_weight)/(n-1)
+    - 同一 chunk 多次出现时合并分数，保留首见 Document
+    """
+    n_eff = len(ranked_lists)
+    if n_eff == 0:
+        return []
+    variant_weight = (1.0 - primary_weight) / (n_eff - 1) if n_eff > 1 else 0.0
+
+    agg: dict[tuple, tuple[float, Document]] = {}
+    for qi, docs in enumerate(ranked_lists):
+        # 首路（原问题）用 primary_weight；后续各视角平分剩余权重
+        w = primary_weight if qi == 0 else variant_weight
+        for rank, doc in enumerate(docs):
+            key = (str(doc.metadata.get("document_id", "")), doc.page_content)
+            contribution = w * (1.0 / (c + rank + 1))
+            cur = agg.get(key)
+            if cur is None:
+                agg[key] = (contribution, doc)
+            else:
+                agg[key] = (cur[0] + contribution, doc)
+
+    ordered = sorted(agg.values(), key=lambda v: v[0], reverse=True)
+    return [doc for _, doc in ordered][:top_k]
+
+
+def multi_query_search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Document]:
+    """多路召回入口：多视角改写 → 逐路 hybrid_search → 二级 RRF 合并。
+
+    每路内部走完整的 hybrid_search（稠密+稀疏+RRF+可选重排），本函数只是上层编排。
+
+    free-chat 判定以原问题（首路）为准：原问题未命中 → 整体返回空（free chat），
+    多路只负责增强召回，不改变"原问题与知识库不相关就走 free chat"的语义。
+    """
+    # 1. 开关关闭 / n<2 / top_k 异常 → 退化为单路 hybrid_search（零开销）
+    if not settings.rag_multi_query_enabled or settings.rag_multi_query_n < 2 or top_k < 1:
+        return hybrid_search(query, top_k=top_k, user_id=user_id)
+
+    # 2. 扩展视角（失败回退 [query]）
+    variants = _expand_query_variants(query, settings.rag_multi_query_n)
+
+    # 3. 逐路检索，候选放大以便去重后仍有足够候选
+    per_query_k = min(int(top_k * settings.rag_multi_query_top_k_scale), 50)
+    per_query_k = max(per_query_k, top_k)  # 至少检索 top_k 个候选
+    ranked_lists = [hybrid_search(q, top_k=per_query_k, user_id=user_id) for q in variants]
+
+    # 4. free-chat 判定以原问题为准：首路为空 → 整体 free chat
+    if not ranked_lists[0]:
+        return []
+
+    # 5. 其余视角全空 → 直接用原问题结果
+    if all(not rl for rl in ranked_lists[1:]):
+        return ranked_lists[0][:top_k]
+
+    # 6. 二级 RRF 融合 → top_k
+    return _cross_query_fuse(
+        ranked_lists,
+        top_k,
+        settings.rag_multi_query_primary_weight,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Optional cross-encoder reranker (implementation lives in app.rag.rerankers)
 # ---------------------------------------------------------------------------
 
