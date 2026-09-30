@@ -88,7 +88,7 @@ flowchart TD
         AUTH["Auth / Users"]
         DOCS["Documents 管理 + 解析管线"]
         CONV["Conversations + RAG 查询"]
-        RAG_ENGINE["RAG Engine<br/>Hybrid Retriever<br/>(PGVector + tsvector/BM25 + RRF)"]
+        RAG_ENGINE["RAG Engine<br/>Multi-Query + Hybrid Retriever<br/>(PGVector + tsvector/BM25 + RRF)"]
     end
 
     subgraph "异步调度层"
@@ -201,14 +201,15 @@ RAG 问答和合规审查共用同一套文档解析管线，支持以下格式�
 
 ## 🔎 RAG 检索流程
 
-系统采用 **Hybrid RAG**：稠密向量（PGVector + bge-m3）与稀疏关键词（PG tsvector + jieba 中文分词，旧版/回退用内存 BM25）双路召回，RRF 融合排序，可选交叉编码器重排。
+系统采用 **Hybrid RAG**：先在 hybrid 模式下调用 **Multi-Query 多路召回**（把问题扩为多视角分别检索再融合），再在单路内做稠密向量（PGVector + bge-m3）与稀疏关键词（PG tsvector + jieba 中文分词，旧版/回退用内存 BM25）双路 `hybrid_search`，RRF 融合排序，可选交叉编码器重排。
 
 ```mermaid
 flowchart TD
     Q["用户提问"] --> H["组装对话历史（最近 20 轮 + 更早摘要）"]
     H --> D{"检索模式 RAG_SEARCH_TYPE"}
-    D -->|hybrid| DH["PGVector 稠密检索<br/>bge-m3 cosine"]
-    D -->|hybrid| SH["稀疏检索<br/>PG tsvector + jieba 分词<br/>或内存 BM25"]
+    D -->|hybrid| MQ["Multi-Query 多路召回<br/>_expand_query_variants 扩为 N 视角"]
+    MQ --> DH["PGVector 稠密检索<br/>bge-m3 cosine"]
+    MQ --> SH["稀疏检索<br/>PG tsvector + jieba 分词<br/>或内存 BM25"]
     DH --> F["RRF 融合"]
     SH --> F
     F --> R["可选 bge-reranker 重排"]
@@ -226,11 +227,13 @@ flowchart TD
 
 **核心设计要点**：
 - **三种检索模式**：`hybrid`（默认）/ `similarity` / `mmr`，通过 `RAG_SEARCH_TYPE` 切换。
+- **Multi-Query 多路召回**（hybrid 模式默认开启，由 `RAG_MULTI_QUERY_ENABLED` 配置）：把问题用 LLM 扩为 `RAG_MULTI_QUERY_N`（默认 3）个视角，各视角独立检索后按 `RAG_MULTI_QUERY_PRIMARY_WEIGHT`（默认 0.5）做二级 RRF 融合；
+  free-chat 判定以原问题（首路）为准，首路未命中即走自由聊天。
 - **稀疏后端可切换**：默认 `RAG_SPARSE_BACKEND=pg_tsvector`（PG 原生全文检索，增量、零内存驻留，适合大文档量）；旧版 `bm25_memory`（进程内全量 BM25）作为回退保留。
-- **无命中回退**：hybrid 用「绝对分数 + 分数离散度」双判据；三者检索为空或判定不相关时，回退到`自由聊天`（前缀标注 *「当前已有文档中找不到答案…」*，不附带来源）。
+- **无命中回退**：hybrid 用「绝对分数 + 分数离散度」双判据；三者检索为空或判定不相关时，回退到`自由聊天`（`free_chat=true`，提示语由前端按标记渲染，不附带来源）。
 - **文档生命周期**：上传时对每个 chunk 用 jieba 分词写入 `search_text`，删除时随行删除——增量维护，无需全量重建索引；旧库启动时由 `ensure_fts_index()` 自动补列 + 建 GIN 索引。
 
-> 📄 **详细流程**：完整的多路检索结构、RRF 融合公式、重排器配置、FAQ 见 [`docs/RAG.md`](docs/RAG.md)；端到端架构见 [`docs/architecture.md`](docs/architecture.md)。
+> 📄 **详细流程**：完整的多路检索结构、Multi-Query 多路召回、RRF 融合公式、重排器配置、FAQ 见 [`docs/RAG.md`](docs/RAG.md)；端到端架构见 [`docs/architecture.md`](docs/architecture.md)。
 
 ---
 
