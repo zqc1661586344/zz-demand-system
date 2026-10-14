@@ -124,8 +124,7 @@ def _index_chunks(db: Session, doc_id: str, chunks: list[Document]) -> None:
         add_documents_to_store(chunks)
         update_document_status(db, doc_id, "indexed", chunk_count=len(chunks))
     except Exception:
-        # 向量写入失败（重试也无望），清理刚落库的 chunk，
-        # 避免 failed 文档的可检索内容残留在 document_chunks 中
+        # 向量写入失败（重试也无望），清理刚落库的 chunk，避免 failed 文档的可检索内容残留在 document_chunks 中
         db.query(DocumentChunk).filter(DocumentChunk.document_id == doc_id).delete()
         db.commit()
         raise
@@ -175,8 +174,13 @@ def process_document(doc_id: str) -> None:
             )
             return
 
+        # 把 chunks 落进 document_chunks 表，并预生成稀疏检索用的分词串。
         _replace_chunks(db, str(doc.id), chunks)
+
+        # 把 chunks 嵌入 + 写入 PGVector "documents" collection，并更新状态。
         _index_chunks(db, str(doc.id), chunks)
+
+        # 刷新 BM25 缓存。
         _refresh_bm25(doc)
 
         logger.info("document %s: indexed %d chunks", doc_id, len(chunks))

@@ -11,11 +11,17 @@ class Base(DeclarativeBase):
 
 
 _db_url = settings.database_url or "sqlite:///./data/app.db"
+
+# 创建数据库引擎，如果环境变量中配置了postgresql连接串，就使用postgresql连接串，否则使用sqlite连接串
 engine = create_engine(
     _db_url,
     echo=False,
     **(
-        {"connect_args": {"check_same_thread": False}}
+        {
+            "connect_args": {
+                "check_same_thread": False,
+            }
+        }
         if "sqlite" in _db_url
         else {
             "pool_size": settings.db_pool_size,

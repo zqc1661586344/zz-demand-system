@@ -24,6 +24,8 @@ class Settings(BaseSettings):
     # App信息配置
     app_name: str = "Enterprise RAG System"
     app_debug: bool = True
+
+    # 日志配置信息
     log_level: str = "INFO"  # 日志级别（DEBUG/INFO/WARNING/ERROR），由 logging_config 读取
     # 日志文件路径；为空字符串则只输出到标准流，不写文件
     log_file: str = "./data/logs/app.log"
@@ -48,8 +50,10 @@ class Settings(BaseSettings):
     jwt_access_token_expire_minutes: int = 30
     jwt_refresh_token_expire_days: int = 7
 
-    # LLM 配置
+    # LLM 配置（OpenAI 或 Ollama），默认使用 OpenAI 协议模型
     llm_provider: Literal["openai", "ollama", "test"] = "openai"
+
+    # LLM 配置（使用远端api 和 key， key和base_url在.env中配置，通过环境变量方式来使用）
     llm_api_key: str = ""
     llm_api_base: str = "https://api.openai.com/v1"
     llm_model: str = "gpt-4o-mini"
@@ -70,7 +74,7 @@ class Settings(BaseSettings):
     embedding_max_retries: int = 3
     rag_embedding_dim: int = 1024
 
-    # PGVector 向量库连接串（psycopg3 格式，替代 Chroma）。留空则无法使用向量库。
+    # PGVector 向量库连接串（psycopg3 格式）。读取.env环境变量 VECTOR_STORE_URL
     vector_store_url: str = ""
     vector_collection_name: str = "documents"
 
@@ -99,9 +103,7 @@ class Settings(BaseSettings):
     rag_hybrid_min_spread: float = 0.015
 
     # --- Rerank 交叉编码器 ---
-    # 默认关闭 rerank。决策依据：RAGAS 评估（k10 组）显示开启后
-    # context_precision 从 0.659 降至 0.607，bge-reranker-v2-m3 在中文法规
-    # 场景的排序增益未达预期。待收集更多场景数据后可重新评估开启。
+    # 默认关闭 rerank。决策依据：RAGAS 评估（k10 组）显示开启后，context_precision 从 0.659 降至 0.607，bge-reranker-v2-m3 场景的排序增益未达预期。待收集更多场景数据后可重新评估开启。
     rag_rerank_enabled: bool = False
     # local（本地 HF 模型）/ siliconflow（硅基 /v1/rerank 远端 API）
     rag_rerank_provider: Literal["local", "siliconflow"] = "siliconflow"
