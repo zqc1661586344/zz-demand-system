@@ -581,8 +581,7 @@ def multi_query_search(query: str, top_k: int = 5, user_id: str | None = None) -
 
     每路内部走完整的 hybrid_search（稠密+稀疏+RRF+可选重排），本函数只是上层编排。
 
-    free-chat 判定以原问题（首路）为准：原问题未命中 → 整体返回空（free chat），
-    多路只负责增强召回，不改变"原问题与知识库不相关就走 free chat"的语义。
+    free-chat 判定以原问题（首路）为准：原问题未命中 → 整体返回空（free chat），多路只负责增强召回，不改变"原问题与知识库不相关就走 free chat"的语义。
     """
     # 1. 开关关闭 / n<2 / top_k 异常 → 退化为单路 hybrid_search（零开销）
     if not settings.rag_multi_query_enabled or settings.rag_multi_query_n < 2 or top_k < 1:

@@ -1,11 +1,11 @@
 """RAG Service — 业务语义化的 RAG 门面层。
 
-把 api/ 和 services/ 层对 rag 内部模块的穿透 import（retrievers / vector_store / pipeline / chain / tasks）统一收敛到本模块，对外只暴露业务语义化接口。compliance 侧的 import 属于技术依赖（复用 LLM provider / 文件加载器），保持不变。
+把 api/ 和services/ 层对rag内部模块的穿透 import（retrievers / vector_store / pipeline / chain / tasks）统一收敛到本模块，对外只暴露业务语义化接口。compliance 侧的 import 属于技术依赖（复用 LLM provider/文件加载器），保持不变。
 
 调用方：
-  - api/conversations.py  → query / query_stream / summarize / sanitize_citations
-  - api/documents.py       → enqueue_process（统一 Celery / BackgroundTasks）
-  - services/document_service.py → delete_document_chunks / notify_data_changed
+  - api/conversations.py  → query/query_stream/summarize/sanitize_citations
+  - api/documents.py       → enqueue_process（统一 Celery/BackgroundTasks）
+  - services/document_service.py → delete_document_chunks/notify_data_changed
 """
 
 from __future__ import annotations

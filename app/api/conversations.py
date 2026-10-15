@@ -77,10 +77,13 @@ def _maybe_summarize(db: Session, conv_id: str, total: int):
 
 def _get_owned_conv(conv_id: str, db: Session, current_user: User) -> Conversation:
     """取对话 + 鉴权。对话不存在抛 404，非 owner 且非 superuser 抛 403。"""
+    # 根据对话id在业务数据库中查询对话是否存在
     conv = get_conversation_by_id(db, conv_id)
     if conv is None:
         logger.error("conversation %s not found", conv_id)
         raise HTTPException(status_code=404, detail="Conversation not found")
+
+    # 检查用户是否是对话的所有者或 superuser
     if conv.created_by != current_user.id and not current_user.is_superuser:  # type: ignore[assignment]
         logger.error("user %s not owner of conversation %s", current_user.id, conv_id)
         raise HTTPException(status_code=403, detail="Access denied")
@@ -92,14 +95,19 @@ def _prepare_query(conv_id: str, db: Session, current_user: User):
 
     返回 (conv, history, summary, total, uid)，权限/对话不存在时直接抛 HTTPException。
     """
+    # 获取当前用户的对话权限等信息
     conv = _get_owned_conv(conv_id, db, current_user)
+
+    # 构建历史记录和摘要
     history, summary, total = _build_history(conv, db, conv_id)
     logger.debug(
         f"query conversation history built, total={total}, summary={summary}, history={history}"
     )
-    # 如果不让敏感信息泄露，考虑用下面的格式，只显示总数和历史记录长度
+
+    # 为防止敏感信息泄露，考虑用下面的格式，只显示总数和历史记录长度
     # logger.debug("query conversation history built, total=%d, history_len=%d", total, len(history))
 
+    # 用户ID，非 superuser 时返回 None
     uid = None if current_user.is_superuser else str(current_user.id)
     logger.debug(f"query conversation uid={uid}")
 
@@ -183,6 +191,7 @@ def list_messages(
     return PaginatedResponse(items=items, total=total, limit=limit, offset=offset)
 
 
+# 非流式对话接口
 @router.post("/{conv_id}/query", response_model=QueryResponse)
 @get_limiter().limit(settings.rate_limit_llm_query)
 def query_conversation(
@@ -294,18 +303,24 @@ def _event_stream(
 
     full_answer_buffer = []
     try:
+        # 流式 RAG 问答，yield event dict（token / sources / free_chat）
         for event in query_rag_stream(
             query=query, top_k=top_k, history=history, summary=summary, user_id=uid
         ):
             if event["type"] == "token":
                 full_answer_buffer.append(event["data"])
+
                 yield f"data: {json.dumps({'token': event['data']})}\n\n"
+
             elif event["type"] == "free_chat":
                 free_chat = True
+
                 yield f"data: {json.dumps({'free_chat': True})}\n\n"
+
             elif event["type"] == "sources":
                 sources = event["data"]
                 final_answer = event.get("full_answer", "") or "".join(full_answer_buffer)
+
                 background_tasks.add_task(
                     _save_messages_background,
                     conv_id,
@@ -313,12 +328,17 @@ def _event_stream(
                     sources,
                     free_chat,
                 )
+
                 background_tasks.add_task(_maybe_summarize_background, conv_id, total)
+
                 yield f"data: {json.dumps({'sources': sources, 'done': True})}\n\n"
+
                 yield "data: [DONE]\n\n"
+
     except Exception as exc:
-        # 处理异常：保存已生成的 token 并返回错误信息，兜底策略
+        # 兜底策略：处理异常，保存已生成的 token 并返回错误信息，确保前端能正常显示错误信息
         partial_answer = "".join(full_answer_buffer)
+
         structured = to_structured_dict(exc, extra={"conversation_id": conv_id})
         logger.warning(
             "streaming RAG query failed for %s (partial=%d chars): error=%s, exc=%s",
@@ -327,6 +347,7 @@ def _event_stream(
             structured.get("error_code"),
             exc,
         )
+
         # 如果有部分生成的 token，返给前端已生成的 token，后面再补上一个错误信息
         if partial_answer:
             _save_messages_background(conv_id, partial_answer, [], True)
@@ -339,11 +360,14 @@ def _event_stream(
                 [],
                 True,
             )
+
         # 返回错误信息
         yield f"data: {json.dumps({'error': structured, 'done': True, 'partial': bool(partial_answer)})}\n\n"
+
         yield "data: [DONE]\n\n"
 
 
+# 流式对话接口
 @router.post("/{conv_id}/query/stream")
 @get_limiter().limit(settings.rate_limit_llm_query)
 def query_conversation_stream(
@@ -359,6 +383,7 @@ def query_conversation_stream(
     事件顺序：[free_chat]? → token* → sources（含 full_answer） → [DONE]
     assistant 消息入库和摘要生成为后台异步任务，不阻塞流输出。
     """
+    # 根据对话 ID 准备查询参数：历史消息、摘要、总消息数、用户ID
     _, history, summary, total, uid = _prepare_query(conv_id, db, current_user)
 
     return StreamingResponse(

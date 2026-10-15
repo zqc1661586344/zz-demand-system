@@ -137,6 +137,7 @@ def _refresh_bm25(doc: DocModel) -> None:
     refresh_bm25_for_user(str(doc.uploaded_by))
 
 
+# 索引管道入口函数
 def process_document(doc_id: str) -> None:
     """单个文档索引完整处理流程：
 
