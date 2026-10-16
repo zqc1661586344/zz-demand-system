@@ -327,19 +327,21 @@ def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
 def _sparse_docs(query: str, top_k: int, user_id: str | None) -> list[Document]:
     """按 `rag_sparse_backend` 取回稀疏检索候选（Document 列表，可能为空）。
 
-    - `pg_tsvector`（且 database_url 为 PG）：直接走 `sparse_search.tsvector_search`，无缓存、读库即最新。
-
-    - `bm25_memory`，以及 PG tsvector 后端但 database_url 指向 SQLite（不可用）：回退内存 BM25。
+    - `pg_tsvector` 且 PG 可用：只用 PG，单次查询异常直接向上抛出问题。
+    - `pg_tsvector` 但 PG 不可用（如 SQLite）：告警后回退内存 BM25。
+    - `bm25_memory`：直接用内存 BM25。
     """
     # 配置了pg_vector，且数据库可用，直接走 tsvector_search
     if settings.rag_sparse_backend == "pg_tsvector":
         from app.rag.sparse_search import is_pg_available, tsvector_search
 
         if is_pg_available():
-            try:
-                return tsvector_search(query, top_k=top_k, user_id=user_id)
-            except Exception as e:
-                logger.warning(f"pg_tsvector search failed, falling back to BM25: {e}")
+            return tsvector_search(query, top_k=top_k, user_id=user_id)
+
+        logger.warning(
+            "rag_sparse_backend=pg_tsvector but DB is not PostgreSQL (%s); fallback to BM25",
+            settings.database_url.split("://", 1)[0],
+        )
 
     sparse = get_bm25_for_user(user_id)
     if sparse is None:
