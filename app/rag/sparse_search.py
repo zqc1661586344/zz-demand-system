@@ -55,13 +55,15 @@ _STOP_WORDS = {
 def tokenize_query(query: str) -> str:
     """对查询做与索引一致的 jieba 分词并过滤停用词，用 " OR " 连接。
 
-    索引侧存储的是 `" ".join(chinese_tokenizer(content))`，查询侧必须用同样的分词，
-    否则 `simple` 全文配置下中文字符会被当作一个整体、无法与已切好的词条精确匹配。
+    索引侧存储的是 `" ".join(chinese_tokenizer(content))`，查询侧必须用同样的分词，否则 `simple` 全文配置下中文字符会被当作一个整体、无法与已切好的词条精确匹配。
     用 OR 连接所有有效 token，使稀疏检索变为"任意关键词命中即可召回"，再用 ts_rank 按命中数量/权重排序，比 plainto_tsquery 的 AND 语义召回率高一个数量级。
     """
+    # 把 query 用 jieba 分词 + 过滤停用词，
     tokens = [t for t in chinese_tokenizer(query) if t.strip().lower() not in _STOP_WORDS]
     if not tokens:
         logger.debug("query=%r reduced to empty after stop-word filtering", query)
+
+    # 用 " OR " 拼接成 "劳动合同 OR 条款" 这样的文本，作为后面 websearch_to_tsquery 的输入。用 OR 是为了"任意一词命中即可召回"，扩大召回率。
     return " OR ".join(tokens)
 
 
@@ -98,7 +100,7 @@ def ensure_fts_index() -> None:
 
 
 def tsvector_search(query: str, top_k: int = 5, user_id: str | None = None) -> list[Document]:
-    """PG 全文稀疏检索，等价替代内存 `get_bm25_for_user` 返回的稀疏 retriever。
+    """PG 全文稀疏检索（关键词检索，使用PG数据库原生实现），等价替代内存 `get_bm25_for_user` 返回的稀疏 retriever。
 
     Args:
         query: 原始查询字符串（内部做与索引一致的 jieba 分词）。
@@ -150,9 +152,11 @@ def tsvector_search(query: str, top_k: int = 5, user_id: str | None = None) -> l
                 meta = json.loads(row["meta"])
             except (TypeError, ValueError):
                 meta = {}
+
         # 统一 metadata：让稀疏结果的 document_id/源信息与稠密结果对齐，便于 RRF 去重。
         meta.setdefault("chunk_id", row["chunk_id"])
         meta.setdefault("content", row["content"])
+
         # 稀疏质量分：SQL 里算出的归一化 ts_rank r（与 WHERE 把关同一尺度）。把关已在 SQL WHERE 完成，此分仅透出供日志/调试，hybrid 不再重复过滤。
         meta.setdefault("sparse_score", row["r"])
         results.append(Document(page_content=row["content"], metadata=meta))

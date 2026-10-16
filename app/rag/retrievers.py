@@ -331,6 +331,7 @@ def _sparse_docs(query: str, top_k: int, user_id: str | None) -> list[Document]:
 
     - `bm25_memory`，以及 PG tsvector 后端但 database_url 指向 SQLite（不可用）：回退内存 BM25。
     """
+    # 配置了pg_vector，且数据库可用，直接走 tsvector_search
     if settings.rag_sparse_backend == "pg_tsvector":
         from app.rag.sparse_search import is_pg_available, tsvector_search
 
@@ -342,6 +343,7 @@ def _sparse_docs(query: str, top_k: int, user_id: str | None) -> list[Document]:
 
     sparse = get_bm25_for_user(user_id)
     if sparse is None:
+        logger.warning("BM25 retriever not found for user %s", user_id)
         return []
 
     try:
@@ -459,9 +461,9 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
     """混合检索：PGVector稠密 + 稀疏 → RRF融合（支持 pg_tsvector 与内存 BM25 两种稀疏后端）。
 
     【相关性判定策略】
-      - 稀疏有数据且 ts_rank ≥ rag_sparse_min_rank → 关键词真命中，跳过 spread，稠密+稀疏 RRF 融合。（pg_tsvector 后端的下限把关已在 SQL WHERE 完成，此处不重复过滤；bm25_memory 无该分，不加下限。）
-      - 稀疏为空（或 SQL 把关后为空）→ 回退纯稠密 + spread 检查判断 free_chat
-      - 融合后仅当稠密侧对该 query 完全零相关（向量库空）才回退 free chat
+        - 稀疏有数据且 ts_rank ≥ rag_sparse_min_rank → 关键词真命中，跳过 spread，稠密+稀疏 RRF 融合。（pg_tsvector 后端的下限把关已在 SQL WHERE 完成，此处不重复过滤；bm25_memory 无该分，不加下限。）
+        - 稀疏为空（或 SQL 把关后为空）→ 回退纯稠密 + spread 检查判断 free_chat
+        - 融合后仅当稠密侧对该 query 完全零相关（向量库空）才回退 free chat
 
     Args:
         query: 查询字符串
