@@ -30,6 +30,9 @@ _RESTORE_PARAM = "rt"
 # "显式退出"标记（URL query param 与 session_state 共用此键）：logout 时同步写入（纯 Python，
 # 无 JS 竞态），恢复路径最先检查它，命中则不恢复、直接显示登录页。登录成功时清除。
 _LOGGED_OUT = "logged_out"
+# session_state 标记：本会话已执行过"从 localStorage 恢复登录"的尝试。
+# 用于防止登录页上每次输入交互触发的脚本重跑都重复注入 JS / 强制重载。
+_RESTORE_DONE = "_restore_done"
 
 
 def _set_auth_session(data: dict, user_info: dict | None = None) -> None:
@@ -110,6 +113,13 @@ def restore_session_from_local_storage() -> bool:
     返回 True 表示已恢复，False 表示无可用 token（应显示登录页）。注意：恢复成功
     时必须补拉 user_info，否则 username 为空、侧栏显示残缺（\"***\"）。
     """
+    # 恢复是"一次性的"：本会话已尝试过则不再注入 JS/重载，避免登录页上的每次输入交互都重新触发重载、把用户输到一半的表单重置回初始位置。
+    if st.session_state.get(_RESTORE_DONE):
+        # 若 URL 仍残留 rt 参数（上次恢复失败未清干净），顺手清掉防止残留
+        st.query_params.pop(_RESTORE_PARAM, None)
+        return False
+    st.session_state[_RESTORE_DONE] = True
+
     # 步骤0：显式退出过 → 拒绝自动恢复（URL 标记对 F5/新标签的\"新会话\"同样生效）
     if st.query_params.get(_LOGGED_OUT) == "1" or st.session_state.get(_LOGGED_OUT):
         logger.info("restore skipped: user logged out")
@@ -132,6 +142,8 @@ def restore_session_from_local_storage() -> bool:
             if resp.status_code != 200:
                 logger.info("restore refresh failed: status=%s", resp.status_code)
                 st.query_params.pop(_RESTORE_PARAM, None)
+                # token 已失效（过期/被吊销）→ 顺手清掉 localStorage 残留，避免每次启动都用同一个过期 token 触发注入+重载的死循环
+                _clear_local_storage()
                 return False
             data = resp.json()
     except Exception as e:

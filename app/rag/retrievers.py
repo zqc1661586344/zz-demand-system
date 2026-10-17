@@ -1,7 +1,6 @@
 """混合检索器——BM25稀疏+PGVector密集+RRF融合+可选交叉编码器重新排序。
 
-核心设计：每个用户拥有独立的 BM25 索引（含私有文档 + 全部共享文档），
-superuser 使用 "__all__" 键的全量索引。
+核心设计：每个用户拥有独立的 BM25 索引（含私有文档 + 全部共享文档），superuser 使用 "__all__" 键的全量索引。
 
 Usage:
     hybrid_search(query, top_k=5, user_id=None) → list[Document]
@@ -11,16 +10,14 @@ Usage:
 import json
 import time
 import threading
-from collections import defaultdict
-
-
 from langchain_core.documents import Document
 
 from app.config import settings
+from app.cache.redis_client import get_redis_client
 from app.logging_config import get_logger
-
+from app.database import SessionLocal
 from app.rag.tokenizer import chinese_tokenizer
-
+from app.rag.vector_store import _user_where, get_vector_store, similarity_search_with_relevance
 
 logger = get_logger(__name__)
 
@@ -70,7 +67,6 @@ def _redis_ts_key(user_key: str) -> str:
 
 def _set_redis_ts(user_key: str, value: float) -> None:
     """写入数据版本号（Redis），仅由"数据变更"路径（mark_bm25_data_changed）调用。"""
-    from app.cache.redis_client import get_redis_client
 
     r = get_redis_client()
     if r is not None:
@@ -84,7 +80,6 @@ def _get_redis_ts(user_key: str) -> float | None:
     """读取数据版本号；未配置 Redis/无记录/已过期返回 None。"""
     if not settings.celery_broker_url:
         return None
-    from app.cache.redis_client import get_redis_client
 
     r = get_redis_client()
     if r is None:
@@ -139,7 +134,6 @@ def refresh_bm25_for_user(user_id: str) -> None:
         refresh_bm25_all()
         return
 
-    from app.database import SessionLocal
     from app.models.document import Document, DocumentChunk
 
     db = SessionLocal()
@@ -166,7 +160,6 @@ def refresh_bm25_for_user(user_id: str) -> None:
 
 def refresh_bm25_all() -> None:
     """从document_chunks读取全部已索引文档，重建全量 BM25（供 superuser "__all__" 使用）。"""
-    from app.database import SessionLocal
     from app.models.document import Document, DocumentChunk
 
     db = SessionLocal()
@@ -200,6 +193,7 @@ def mark_bm25_data_changed(user_id: str | None = None, *, shared: bool = False) 
     keys: set[str] = {"__all__"}
     if user_id:
         keys.add(str(user_id))
+
     if shared:
         with _bm25_lock:
             keys.update(_bm25_map.keys())  # 本进程已知的所有用户索引均受共享文档影响
@@ -208,6 +202,7 @@ def mark_bm25_data_changed(user_id: str | None = None, *, shared: bool = False) 
         for k in keys:
             _bm25_map.pop(k, None)
             _bm25_ts_map.pop(k, None)
+
     for k in keys:
         _set_redis_ts(k, now)
 
@@ -218,6 +213,7 @@ def _get_bm25_bypass(key: str) -> "BM25Retriever | None":
         refresh_bm25_all()
     else:
         refresh_bm25_for_user(key)
+
     with _bm25_lock:
         cached = _bm25_map.get(key)
         return cached if cached is not _LOADING else None
@@ -309,11 +305,15 @@ def get_bm25_for_user(user_id: str | None) -> "BM25Retriever | None":
     """
     key = user_id if user_id is not None else "__all__"
 
+    # 旁路模式
     if settings.rag_bm25_cache_bypass:
+        # 每次强制从 DB 重建，不读缓存
         return _get_bm25_bypass(key)
 
+    # 查 Redis 看"数据版本号应该是多少"
     redis_ts = _resolve_redis_ts(key)
 
+    # 判定本地缓存是否仍有效
     cached = _check_bm25_cache(key, redis_ts)
     if cached is not _CACHE_MISS:
         return cached
@@ -370,13 +370,17 @@ def _rrf_fuse(
     ranked: dict[tuple, tuple[float, Document]] = {}
     for docs, weight in ((dense, alpha), (sparse, 1.0 - alpha)):
         for rank, doc in enumerate(docs):
+            # 用 (document_id, page_content) 去重，把"同一个 chunk 在两条路都出现"的贡献累加
             key = (str(doc.metadata.get("document_id", "")), doc.page_content)
+            # 计算当前文档的 RRF 贡献
             contribution = weight * (1.0 / (c + rank + 1))
             cur = ranked.get(key)
             if cur is None:
                 ranked[key] = (contribution, doc)
             else:
                 ranked[key] = (cur[0] + contribution, doc)
+
+    # 按融合分降序
     ordered = sorted(ranked.values(), key=lambda v: v[0], reverse=True)
     return [doc for _, doc in ordered]
 
@@ -386,13 +390,16 @@ def _dense_only_search(query: str, top_k: int, user_id: str | None) -> list[Docu
 
     如果 dense top1 分数过低或 top1/top2 分差过窄 → 返回空（free chat）。
     """
-    from app.rag.vector_store import _user_where, get_vector_store, similarity_search_with_relevance
-
+    # 第一次：相似度检索 + 取分数 → 只用 top-4 做相关判定
     scored = similarity_search_with_relevance(query, k=min(top_k, 4), user_id=user_id)
     if not scored:
         return []
 
     top1, spread = scored[0][1], (scored[0][1] - scored[1][1] if len(scored) >= 2 else 1.0)
+
+    # 最高的 cosine 相似度太低 → 完全不相关
+    # top1 和 top2 分差过窄 → 不确定是否相关
+    # 任一命中 → 返回空 = free chat
     if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
         logger.info(
             "dense-only top-1=%.3f spread=%.3f (min=%.3f/%.3f) → free chat",
@@ -403,6 +410,7 @@ def _dense_only_search(query: str, top_k: int, user_id: str | None) -> list[Docu
         )
         return []
 
+    # 第二次：过了判定，才重新召回 top_k 个真正的结果
     try:
         vs = get_vector_store()
         return vs.as_retriever(search_kwargs={"k": top_k, "filter": _user_where(user_id)}).invoke(
@@ -420,12 +428,12 @@ def _hybrid_fusion(
 
     即使稀疏有弱命中，如果 dense top1 分数过低 → 返回空（free chat）。
     """
-    from app.rag.vector_store import _user_where, get_vector_store, similarity_search_with_relevance
 
-    # pg_tsvector 后端的弱命中把关已在 SQL WHERE 完成（归一化 ts_rank > min_rank），返回的候选均已达标；bm25_memory 回退无 sparse_score，保持原行为（不加下限）。能走到这里说明 sparse_docs 非空（分支 1 已处理空稀疏），无需再判。
+    # pg_tsvector 后端的弱命中把关已在 SQL WHERE 完成（归一化 ts_rank > min_rank），返回的候选均已达标；bm25_memory 回退无 sparse_score，保持原行为（不加下限）。能走到这里说明 sparse_docs 非空。
 
     try:
         vs = get_vector_store()
+        # 稠密检索，取前 top_k 个文档
         dense_docs = vs.as_retriever(
             search_kwargs={"k": top_k, "filter": _user_where(user_id)}
         ).invoke(query)
@@ -433,6 +441,7 @@ def _hybrid_fusion(
         logger.error("hybrid_search dense path failed, using sparse only: %s", e)
         dense_docs = []
 
+    # 融合稀疏：sparse_docs 与稠密：dense_docs结果
     docs = _rrf_fuse(dense_docs, sparse_docs, settings.rag_hybrid_alpha)
 
     # 【相关性兜底】融合后再用 dense 侧 top1 分数 + spread 离散度双判据判定是否需要 free chat。
@@ -442,8 +451,11 @@ def _hybrid_fusion(
         if not scored:
             logger.info("hybrid path but cosine found no match at all → free chat")
             return []
+
         top1 = scored[0][1]
         spread = scored[0][1] - scored[1][1] if len(scored) >= 2 else 1.0
+
+        # 虽然稀疏命中了，但如果稠密侧 top1 < min_score 或 spread 过窄 → 说明关键词只是碰巧匹配，实际向量上完全不相关 → 仍判定 free chat
         if top1 < settings.rag_min_score or spread < settings.rag_hybrid_min_spread:
             logger.info(
                 "hybrid path dense top-1=%.3f spread=%.3f (min=%.3f/%.3f) → free chat "
@@ -455,6 +467,7 @@ def _hybrid_fusion(
             )
             return []
 
+    # （可选的 LLM/交叉重排）→ 返回 top_k
     reranked = _maybe_rerank(query, docs)
     return (reranked or docs)[:top_k]
 
@@ -475,12 +488,20 @@ def hybrid_search(query: str, top_k: int = 5, user_id: str | None = None) -> lis
     Returns:
         排序后的 Document 列表，或空列表（free chat）。
     """
+    # 先稀疏检索的目的，是用稀疏命中与否来判断"这个 query 是否该走 RAG"（相关性判定），以及用怎样的方式融合。原因有两点：
+
+    # 稀疏是廉价的关键词预检。检索成本低，能快速判断 query 里是否真的含知识库的关键词。
+    # 决定"是否要额外做 free-chat 判定"。如果用户问的和知识库无关，就回退成自由对话（free chat），而不是硬塞不相关文档给 LLM。
+
+    # 两条路径最终都靠 dense top1 分数 + spread 离散度双判据决定是否回退 free chat，确保"无关 query 不会被硬塞 RAG 文档"
+
     # 1. 取稀疏候选；无稀疏数据 → 纯稠密，做 spread 判定
     sparse_docs = _sparse_docs(query, top_k, user_id)
+    # 稀疏检索为空
     if not sparse_docs:
         return _dense_only_search(query, top_k, user_id)
 
-    # 2. 稀疏有命中 → 无需 spread，稠密+稀疏 RRF 融合。
+    # 2. 稀疏有命中，说明 query 命中了关键词 → 无需 spread，稠密+稀疏 RRF 融合。
     return _hybrid_fusion(query, top_k, user_id, sparse_docs)
 
 
